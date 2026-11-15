@@ -84,13 +84,38 @@ export async function checkAiComments(app, page) {
     await page.waitForTimeout(400);
     await page.screenshot({ path: "release/smoke/ai-comments.png" });
 
+    // Each note has an icon on the page. Hovering it, or the highlighted words, shows the note over the page;
+    // clicking the icon opens the note for editing.
+    const markers = page.locator(".folio-note-marker");
+    await markers.nth(1).waitFor();
+    assert.equal(await markers.count(), 2);
+    const peek = page.locator(".note-peek");
+    await markers.first().hover();
+    await peek.filter({ hasText: "Check the timetable." }).waitFor();
+    await page.waitForTimeout(150);
+    await page.screenshot({ path: "release/smoke/note-peek.png" });
+    await page.mouse.move(5, 5);
+    await peek.waitFor({ state: "detached" });
+    const words = await page.evaluate(() => {
+      const span = [...document.querySelectorAll(".textLayer span")].find((s) => s.textContent.includes("Tickets cost"));
+      const r = span.getBoundingClientRect();
+      const frame = window.frameElement?.getBoundingClientRect() ?? { left: 0, top: 0 };
+      return { x: frame.left + r.left + 30, y: frame.top + r.top + r.height / 2 };
+    });
+    await page.mouse.move(words.x, words.y);
+    await peek.filter({ hasText: "Price may be out of date." }).waitFor();
+    await markers.first().click();
+    await page.getByRole("dialog", { name: "Note" }).getByRole("textbox").waitFor();
+    assert.equal(await page.getByRole("dialog", { name: "Note" }).getByRole("textbox").inputValue(), "Check the timetable.");
+    await page.getByRole("dialog", { name: "Note" }).getByRole("button", { name: "Cancel" }).click();
+
     await panel.getByRole("button", { name: "harbor-large", exact: true }).click();
     await settings.getByRole("button", { name: "Change endpoint" }).click();
     await settings.getByRole("button", { name: "Remove endpoint" }).click();
     await settings.getByLabel("Ask AI provider").selectOption("chatgpt");
     await settings.getByRole("button", { name: "Close" }).click();
     await page.getByRole("tablist", { name: "Open documents" }).getByRole("button", { name: "Close Harbor notes.pdf" }).click();
-    console.log("ok  Ask AI comments: quotes found across pages and punctuation, comments attached, missing ones listed, click reveals");
+    console.log("ok  Ask AI comments: quotes found across pages and punctuation, comments attached, missing ones listed, click reveals; note icons and hover pop-ups");
   } finally {
     await app.evaluate(() => { globalThis.commentsTest.restore(); delete globalThis.commentsTest; });
     server.close();

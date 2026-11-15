@@ -22,7 +22,8 @@ import { Icon, type IconName } from "./icons";
 import { Welcome } from "./Welcome";
 import { Sidebar, type SidebarTab } from "./Sidebar";
 import { MarkupController, type Mark, type MarkupState } from "./markup";
-import { HighlightMenu, NoteBox, SelectionPopover, useTextSelection, type SelectionInfo } from "./Selection";
+import { HighlightMenu, NoteBox, NotePeek, SelectionPopover, useTextSelection, type SelectionInfo } from "./Selection";
+import { drawNoteMarkers, hasNote } from "./noteMarkers";
 import { NotesPanel } from "./NotesPanel";
 import { notesJson, notesMarkdown } from "./noteExport";
 import { copyText } from "./clipboard";
@@ -254,6 +255,8 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
   const [pinned, setPinned] = useState<SelectionInfo | null>(null);
   const [highlightMenu, setHighlightMenu] = useState<{ id: string; rect: { left: number; top: number; right: number; bottom: number } } | null>(null);
+  const [notePeek, setNotePeek] = useState<{ id: string; anchor: { x: number; top: number; bottom: number } } | null>(null);
+  const peekTimer = useRef(0);
   const [imageMenu, setImageMenu] = useState<{ target: ImageTarget; x: number; y: number } | null>(null);
   const [imageView, setImageView] = useState<ImageTarget | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
@@ -804,7 +807,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
       if (toolRef.current !== "select" || e.button !== 0) return;
       const current = document.getSelection();
       if (current && !current.isCollapsed) return;
-      if ((e.target as HTMLElement).closest("a, .annotationCommentButton, .folio-content-layer")) return;
+      if ((e.target as HTMLElement).closest("a, .annotationCommentButton, .folio-note-marker, .folio-content-layer")) return;
       const hit = markupRef.current?.markAt(e.clientX, e.clientY);
       if (!hit) return setHighlightMenu(null);
       const stage = container.parentElement!.getBoundingClientRect();
@@ -868,6 +871,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
   }, [container]);
   useEffect(() => { setImageMenu(null); setImageView(null); }, [doc]);
   const menuMark = highlightMenu ? markup.marks.find((m) => m.id === highlightMenu.id) : undefined;
+  const peekMark = notePeek ? markup.marks.find((m) => m.id === notePeek.id && hasNote(m)) : undefined;
 
   const removeHighlight = (id: string) => {
     markupRef.current!.remove(id);
@@ -905,6 +909,81 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
     observer.observe(stage);
     return () => observer.disconnect();
   }, [container]);
+
+  // Note icons on the page: drawn for the current notes, and again whenever pdf.js redraws a page (which clears them).
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (viewer?.pdfDocument) drawNoteMarkers(viewer, markup.marks);
+  }, [markup, doc, scale, rotation]);
+  useEffect(() => {
+    const bus = busRef.current;
+    if (!bus) return;
+    const redraw = () => {
+      const viewer = viewerRef.current, marks = markupRef.current?.state.marks;
+      if (viewer?.pdfDocument && marks) drawNoteMarkers(viewer, marks);
+    };
+    bus.on("pagerendered", redraw);
+    return () => bus.off("pagerendered", redraw);
+  }, [container]);
+  useEffect(() => { container?.classList.toggle("viewer-notes-inert", tool !== "select"); }, [container, tool]);
+
+  // Hovering a note icon, or a highlight that has a note, shows the note over the page. It stays open while the
+  // pointer moves onto it, so a long note can be read and scrolled.
+  useEffect(() => {
+    if (!container) return;
+    let frame = 0;
+    let last: MouseEvent | null = null;
+    const hide = () => {
+      window.clearTimeout(peekTimer.current);
+      peekTimer.current = window.setTimeout(() => setNotePeek(null), 220);
+    };
+    const show = (id: string, r: { left: number; right: number; top: number; bottom: number }) => {
+      window.clearTimeout(peekTimer.current);
+      const stage = container.parentElement!.getBoundingClientRect();
+      setNotePeek((current) => current?.id === id ? current
+        : { id, anchor: { x: (r.left + r.right) / 2 - stage.left, top: r.top - stage.top, bottom: r.bottom - stage.top } });
+    };
+    const check = () => {
+      frame = 0;
+      const e = last;
+      if (!e || toolRef.current !== "select" || e.buttons) return hide();
+      const marker = (e.target as HTMLElement).closest<HTMLElement>(".folio-note-marker");
+      if (marker?.dataset.mark) return show(marker.dataset.mark, marker.getBoundingClientRect());
+      const hit = markupRef.current?.markAt(e.clientX, e.clientY);
+      const mark = hit && markupRef.current!.state.marks.find((m) => m.id === hit.id);
+      if (hit && mark && hasNote(mark)) return show(hit.id, hit.rect);
+      hide();
+    };
+    const onMove = (e: MouseEvent) => { last = e; if (!frame) frame = requestAnimationFrame(check); };
+    const onScroll = () => { window.clearTimeout(peekTimer.current); setNotePeek(null); };
+    const onMarkerClick = (e: MouseEvent) => {
+      const marker = (e.target as HTMLElement).closest<HTMLElement>(".folio-note-marker");
+      const mark = marker && markupRef.current?.state.marks.find((m) => m.id === marker.dataset.mark);
+      if (!marker || !mark) return;
+      e.preventDefault();
+      e.stopPropagation();
+      window.clearTimeout(peekTimer.current);
+      setNotePeek(null);
+      setHighlightMenu(null);
+      const stage = container.parentElement!.getBoundingClientRect();
+      const r = marker.getBoundingClientRect();
+      setNoteBox({ markId: mark.id, anchor: { x: r.left + r.width / 2 - stage.left, top: r.top - stage.top, bottom: r.bottom - stage.top },
+        quote: mark.text, initial: mark.note });
+    };
+    container.addEventListener("mousemove", onMove);
+    container.addEventListener("mouseleave", hide);
+    container.addEventListener("scroll", onScroll, { passive: true });
+    container.addEventListener("click", onMarkerClick, true);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(peekTimer.current);
+      container.removeEventListener("mousemove", onMove);
+      container.removeEventListener("mouseleave", hide);
+      container.removeEventListener("scroll", onScroll);
+      container.removeEventListener("click", onMarkerClick, true);
+    };
+  }, [container]);
+  useEffect(() => setNotePeek(null), [doc, scale, tool]);
 
   // pdf.js shows a small note button on highlights that have a note; open Folio's note box from it.
   useEffect(() => {
@@ -1659,6 +1738,22 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
               }}
               onAsk={() => { askAbout(menuMark.text, menuMark.page + 1); setHighlightMenu(null); }}
               onRemove={() => removeHighlight(menuMark.id)}
+            />
+          )}
+          {notePeek && peekMark && !noteBox && !highlightMenu && !selection && (
+            <NotePeek
+              key={notePeek.id}
+              anchor={notePeek.anchor}
+              stageWidth={stageWidth}
+              note={peekMark.note}
+              page={peekMark.page + 1}
+              color={peekMark.color}
+              onEnter={() => window.clearTimeout(peekTimer.current)}
+              onLeave={() => { window.clearTimeout(peekTimer.current); peekTimer.current = window.setTimeout(() => setNotePeek(null), 220); }}
+              onEdit={() => {
+                setNoteBox({ markId: peekMark.id, anchor: notePeek.anchor, quote: peekMark.text, initial: peekMark.note });
+                setNotePeek(null);
+              }}
             />
           )}
           {noteBox && (

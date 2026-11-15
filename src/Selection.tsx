@@ -236,3 +236,31 @@ export function NoteBox({ anchor, stageWidth, quote, initial, onSave, onClose }:
     </div>
   );
 }
+
+interface NotePeekProps {
+  anchor: { x: number; top: number; bottom: number };
+  stageWidth: number;
+  note: string;
+  page: number;
+  color: string;
+  onEdit: () => void;
+  /** The pointer is over the pop-up, so it stays open for reading and scrolling. */
+  onEnter: () => void;
+  onLeave: () => void;
+}
+
+/** A note shown over the page while hovering its highlight or note icon, like a PDF editor's comment pop-up. */
+export function NotePeek({ anchor, stageWidth, note, page, color, onEdit, onEnter, onLeave }: NotePeekProps) {
+  // Room for the text up to the scrolling limit, so the card opens above the highlight when it fits there.
+  const height = Math.min(260, 52 + Math.ceil(note.length / 42) * 20);
+  return (
+    <div className="note-peek" role="tooltip" style={{ ...place(anchor, 320, height, stageWidth), "--mark": color } as React.CSSProperties}
+      onMouseEnter={onEnter} onMouseLeave={onLeave}>
+      <div className="note-peek-text">{note}</div>
+      <div className="note-peek-foot">
+        <span>p. {page}</span>
+        <button className="link small" onClick={onEdit}>Edit</button>
+      </div>
+    </div>
+  );
+}
