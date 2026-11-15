@@ -8,6 +8,7 @@ import { ocrSession } from "./lib/ocr";
 import { CLAUDE_CODE_URL, PROVIDERS, savedProvider, saveAiPreference, signInChatGPT, subscribeAiPreferences, USAGE_URL } from "./ai";
 import { Modal } from "./Dialogs";
 import { readSetting } from "./preferences";
+import { splitComments, type AiComment, type PlacedComment } from "./aiComments";
 
 const AiMarkdown = lazy(() => import("./AiMarkdown").then((module) => ({ default: module.AiMarkdown })));
 
@@ -19,6 +20,11 @@ export interface AiContext {
 interface Message extends AiMessage {
   context?: AiContext;
   error?: { message: string; code?: string; link?: string };
+  /** Session only: which answer this is, and what became of the comments it asked for. */
+  answerId?: string;
+  placed?: PlacedComment[] | "adding";
+  /** The answer just finished: add any comments it asks for. */
+  finished?: boolean;
 }
 
 const MAX_DOC_CHARS = 400_000;
@@ -131,11 +137,53 @@ interface Props {
   context: AiContext | null;
   onClearContext: () => void;
   onGoToPage: (n: number) => void;
+  /** Highlights each quote and attaches its comment; resolves with where each one went. */
+  onAddComments: (comments: AiComment[]) => Promise<PlacedComment[]>;
+  onRevealMark: (id: string) => void;
   onSettings: () => void;
   onClose: () => void;
 }
 
-export function AiPanel({ pdf, docId, persist, docName, context, onClearContext, onGoToPage, onSettings, onClose }: Props) {
+/** The comments an answer asked for: being added, added (each one opens its spot), or from an earlier session. */
+function CommentsCard({ comments, placed, onAdd, onRevealMark, onGoToPage }: {
+  comments: AiComment[];
+  placed?: PlacedComment[] | "adding";
+  onAdd: () => void;
+  onRevealMark: (id: string) => void;
+  onGoToPage: (n: number) => void;
+}) {
+  const done = Array.isArray(placed) ? placed : null;
+  const added = done?.filter((c) => c.markId).length ?? 0;
+  const missed = done ? done.length - added : 0;
+  const list: PlacedComment[] = done ?? comments;
+  const title = placed === "adding" ? `Adding ${comments.length} comment${comments.length === 1 ? "" : "s"}…`
+    : done ? `Added ${added} comment${added === 1 ? "" : "s"}${missed ? ` · ${missed} not found` : ""}`
+    : `${comments.length} comment${comments.length === 1 ? "" : "s"} suggested`;
+  return (
+    <div className="ai-comments">
+      <div className="ai-comments-head">
+        <Icon name="note" size={14} /> <span>{title}</span>
+        {!placed && <button className="link small" onClick={onAdd}>Add to document</button>}
+        {done && missed > 0 && <button className="link small" onClick={onAdd}>Try again</button>}
+      </div>
+      <ul>
+        {list.map((c, i) => (
+          <li key={i} className={done && !c.markId ? "missed" : undefined}>
+            <button className="ai-comment" disabled={placed === "adding"}
+              title={done && !c.markId ? "Folio couldn't find these words in the document" : "Show on page"}
+              onClick={() => c.markId ? onRevealMark(c.markId) : c.page && onGoToPage(c.page)}>
+              <span className="ai-comment-quote">{c.page ? `p. ${c.page}: ` : ""}“{c.quote.length > 80 ? c.quote.slice(0, 80) + "…" : c.quote}”</span>
+              <span className="ai-comment-text">{c.comment}</span>
+              {done && !c.markId && <span className="ai-comment-missed">Couldn't find these words</span>}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+export function AiPanel({ pdf, docId, persist, docName, context, onClearContext, onGoToPage, onAddComments, onRevealMark, onSettings, onClose }: Props) {
   const ai = window.folioDesktop?.ai;
   const [status, setStatus] = useState<AiStatus | null>(null);
   const provider = useSyncExternalStore(subscribeAiPreferences, savedProvider);
@@ -212,6 +260,7 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
         if (!last || last.role !== "assistant") return list;
         if (event.type === "delta") next[next.length - 1] = { ...last, content: last.content + (event.text ?? "") };
         if (event.type === "error") next[next.length - 1] = { ...last, error: { message: event.message ?? "Something went wrong.", code: event.code, link: event.link } };
+        if (event.type === "done") next[next.length - 1] = { ...next[next.length - 1], finished: true };
         return next;
       });
       if (event.type !== "delta") {
@@ -226,6 +275,25 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  // Once an answer finishes, add the comments it asked for. Marked on the answer itself (in the same update as its
+  // last words), so this never reads an answer that is still arriving.
+  const addCommentsRef = useRef(onAddComments);
+  addCommentsRef.current = onAddComments;
+  const addComments = useCallback((answerId: string, comments: AiComment[], kept: PlacedComment[] = []) => {
+    const mark = (placed: Message["placed"]) => setMessages((list) => list.map((m) => m.answerId === answerId ? { ...m, placed } : m));
+    mark("adding");
+    void addCommentsRef.current(comments).then((placed) => mark([...kept, ...placed]), () => mark([...kept, ...comments.map((c) => ({ ...c }))]));
+  }, []);
+  useEffect(() => {
+    const done = messages.filter((m) => m.finished);
+    if (!done.length) return;
+    setMessages((list) => list.map((m) => m.finished ? { ...m, finished: false } : m));
+    for (const answer of done) {
+      const { comments } = splitComments(answer.content);
+      if (answer.answerId && !answer.error && comments.length) addComments(answer.answerId, comments);
+    }
+  }, [messages, addComments]);
 
   const connected = { chatgpt: chatgptConnected, claude: !!status?.claude.installed && status.claude.loggedIn,
     openrouter: !!status?.openrouter?.configured && !!model, custom: !!status?.custom?.configured && !!model };
@@ -266,7 +334,7 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
     preparing.current = id;
     busyRef.current = id;
     setBusy(id);
-    setMessages([...messages, turn, { role: "assistant", content: "" }]);
+    setMessages([...messages, turn, { role: "assistant", content: "", answerId: id }]);
     setInput("");
     onClearContext();
     try {
@@ -403,14 +471,25 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
                       <button className="btn primary" onClick={signIn}>Continue with ChatGPT</button>
                     )}
                   </div>
-                ) : m.content ? (
-                  <>
-                    <Suspense fallback={<p style={{ whiteSpace: "pre-wrap" }}>{m.content}</p>}>
-                      <AiMarkdown text={m.content} onPage={onGoToPage} />
-                    </Suspense>
-                    {(!busy || i < messages.length - 1) && <CopyResponse text={m.content} />}
-                  </>
-                ) : (
+                ) : m.content ? (() => {
+                  const answer = splitComments(m.content);
+                  const answerId = m.answerId ?? `history-${i}`;
+                  return <>
+                    {answer.text && <Suspense fallback={<p style={{ whiteSpace: "pre-wrap" }}>{answer.text}</p>}>
+                      <AiMarkdown text={answer.text} onPage={onGoToPage} />
+                    </Suspense>}
+                    {answer.pending && <p className="ai-checking">Writing comments…</p>}
+                    {!answer.pending && answer.comments.length > 0 && (
+                      <CommentsCard comments={answer.comments} placed={m.placed} onRevealMark={onRevealMark} onGoToPage={onGoToPage}
+                        onAdd={() => {
+                          if (!m.answerId) setMessages((list) => list.map((x, k) => k === i ? { ...x, answerId } : x));
+                          if (Array.isArray(m.placed)) addComments(answerId, m.placed.filter((c) => !c.markId), m.placed.filter((c) => c.markId));
+                          else addComments(answerId, answer.comments);
+                        }} />
+                    )}
+                    {(!busy || i < messages.length - 1) && answer.text && <CopyResponse text={answer.text} />}
+                  </>;
+                })() : (
                   <div className="typing" aria-label="Thinking"><span /><span /><span /></div>
                 )}
               </div>

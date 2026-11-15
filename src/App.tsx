@@ -33,6 +33,7 @@ import { ImageMenu, ImageViewer, type ImageTarget } from "./ImageViewer";
 import { MoreMenu, type MoreItem } from "./MoreMenu";
 import { IS_MAC, keys } from "./platform";
 import { AiPanel, forgetClearedChats, type AiContext } from "./AiPanel";
+import { placeComments } from "./aiComments";
 import { ZoomMenu } from "./ZoomMenu";
 import { SearchBar, type FindResult } from "./SearchBar";
 import { AboutDialog, InfoDialog, OpenUrlDialog, PasswordDialog, ShortcutsDialog, parseWebUrl } from "./Dialogs";
@@ -1695,6 +1696,15 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
             context={aiContext}
             onClearContext={() => setAiContext(null)}
             onGoToPage={goTo}
+            onAddComments={async (comments) => {
+              const owner = docRef.current;
+              const placed = await placeComments(viewerRef.current!, markupRef.current!, comments, highlightColor,
+                () => owner === docRef.current);
+              const first = placed.find((c) => c.markId);
+              if (first && owner === docRef.current) markupRef.current!.reveal(first.markId!);
+              return placed;
+            }}
+            onRevealMark={(id) => markupRef.current!.reveal(id)}
             onSettings={() => setDialog("ai-settings")}
             onClose={() => setAiOpen(false)}
           />
