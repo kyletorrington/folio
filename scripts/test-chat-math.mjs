@@ -55,6 +55,22 @@ $$`);
     }
   });
 
+  check("tables render as tables, with money and page links intact", () => {
+    const html = render([
+      "Three tiers:", "",
+      "| Tier | Price per meter per month |", "|---|---|",
+      "| Meter reading | **$2** |", "| Billing & payments | **$5** |", "| Energy data services | **$9** |", "",
+      "See the figure (p. 33).",
+    ].join("\n"));
+    assert.match(html, /<div class="msg-table"><table>/);
+    assert.equal([...html.matchAll(/<th\b/g)].length, 2);
+    assert.equal([...html.matchAll(/<tr\b/g)].length, 4);
+    assert.match(html, /<td><strong>\$5<\/strong><\/td>/);
+    assert.doesNotMatch(html, /\|---\|/);
+    assert.equal(mathCount(html), 0);
+    assert.equal(pageRefCount(html), 1);
+  });
+
   check("single line breaks remain visible in saved answers", () => {
     for (const newline of ["\n", "\r\n"]) {
       const html = render(["Summary:", "• First point (p. 2)", "• Second point"].join(newline));

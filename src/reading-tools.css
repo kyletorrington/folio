@@ -1145,3 +1145,22 @@
   font-size: 12px;
   color: var(--text-3);
 }
+
+/* Tables in Ask AI answers */
+.msg .msg-table {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.msg table {
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+.msg th,
+.msg td {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+.msg th { background: var(--hover); font-weight: 600; }

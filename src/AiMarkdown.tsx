@@ -2,6 +2,7 @@ import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
 import rehypeKatex from "rehype-katex";
 import { normalizeMathDelimiters } from "./chatMath";
 import "katex/dist/katex.min.css";
@@ -42,9 +43,11 @@ export const AiMarkdown = memo(function AiMarkdown({ text, onPage }: { text: str
     <ReactMarkdown
       skipHtml
       disallowedElements={["img"]}
-      remarkPlugins={[[remarkMath, { singleDollarTextMath: false }], remarkPageReferences, remarkBreaks]}
+      remarkPlugins={[[remarkGfm, { singleTilde: false }], [remarkMath, { singleDollarTextMath: false }], remarkPageReferences, remarkBreaks]}
       rehypePlugins={[[rehypeKatex, { trust: false, strict: "ignore", maxExpand: 1000, maxSize: 20 }]]}
       components={{
+        // Wide tables scroll sideways inside the chat instead of squashing their columns.
+        table: ({ node, ...props }) => <div className="msg-table"><table {...props} /></div>,
         a: ({ node, children }) => {
           const page = Number(node?.properties["data-folio-page"]);
           return Number.isSafeInteger(page) && page > 0
