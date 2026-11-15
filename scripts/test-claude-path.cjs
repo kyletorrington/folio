@@ -29,12 +29,12 @@ test("finds Claude Code in a Homebrew or npm folder when the app gets the Dock's
   assert.equal(findClaude({ platform: "darwin", home, envPath: GUI_PATH, extraFolders: [] }), null);
 });
 
-test("macOS and Linux also look where Homebrew, npm, and the older local installer put claude; Windows doesn't", () => {
+test("macOS and Linux also look where Homebrew, npm, and the older local installer put claude; Windows looks inside an npm install", () => {
   const home = path.join(path.sep, "Users", "someone");
   const expected = ["/opt/homebrew/bin", "/usr/local/bin", path.join(home, ".claude", "local")];
   assert.deepEqual(installFolders("darwin", home), expected);
   assert.deepEqual(installFolders("linux", home), expected);
-  assert.deepEqual(installFolders("win32", home), []);
+  assert.deepEqual(installFolders("win32", home), [path.join(home, "AppData", "Roaming", "npm", "node_modules", "@anthropic-ai", "claude-code", "bin")]);
 });
 
 test("looks in the older local install by default", { skip: ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"].some(fs.existsSync) }, (t) => {

@@ -4,8 +4,11 @@ const path = require("node:path");
 
 // Apps opened from the Dock, Finder, or a double-clicked PDF get launchd's PATH (/usr/bin:/bin:/usr/sbin:/sbin), which
 // leaves out where Homebrew, npm, and Claude Code's older local installer put `claude`.
+// On Windows, an `npm install -g` of Claude Code puts only claude.cmd on PATH; the real claude.exe sits in the package.
 const installFolders = (platform, home) =>
-  platform === "win32" ? [] : ["/opt/homebrew/bin", "/usr/local/bin", path.join(home, ".claude", "local")];
+  platform === "win32"
+    ? [path.join(home, "AppData", "Roaming", "npm", "node_modules", "@anthropic-ai", "claude-code", "bin")]
+    : ["/opt/homebrew/bin", "/usr/local/bin", path.join(home, ".claude", "local")];
 
 // On Windows, `npm install -g @anthropic-ai/claude-code` puts only a `claude.cmd` shim on PATH. The shim starts the
 // package's native claude.exe, which npm keeps at this path inside the same folder.

@@ -219,6 +219,11 @@ function setupAutoUpdate() {
     updateStatus = { state: "unsupported", message: "system" };
     return;
   }
+  // Personal fork: never pull official releases, which would overwrite local changes. Set folioUpdates: true to re-enable.
+  if (require("../package.json").folioUpdates === false) {
+    updateStatus = { state: "unsupported" };
+    return;
+  }
   if ((kind === "development" && !process.env.FOLIO_UPDATE_TEST) || kind === "portable") {
     updateStatus = { state: "unsupported" };
     return;

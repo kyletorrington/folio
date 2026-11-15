@@ -2,6 +2,7 @@
   "name": "folio-pdf-reader",
   "private": true,
   "version": "1.16.1",
+  "folioUpdates": false,
   "type": "module",
   "scripts": {
     "assets": "node scripts/copy-pdfjs-assets.mjs && node scripts/copy-ocr-assets.mjs",
@@ -114,8 +115,8 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "Forward-Future",
-        "repo": "folio-releases",
+        "owner": "kyletorrington",
+        "repo": "folio",
         "releaseType": "release"
       }
     ],
