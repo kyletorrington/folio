@@ -215,6 +215,10 @@ export interface StoredMark {
   note: string;
   color: string;
   createdAt: number;
+  /** The annotation this mark was read from when the PDF already had it (added in another app, or a saved copy). */
+  source?: string;
+  /** Who wrote the note, when the PDF says. */
+  author?: string;
   /** pdf.js editor serialization, used to recreate the mark. */
   data: Record<string, unknown>;
 }
@@ -224,7 +228,18 @@ export interface DocNotes {
   note: string;
   marks: StoredMark[];
   bookmarkedPages?: number[]; // One-based, absent in older records.
+  /** Annotations already in the PDF that Folio took over as marks (absent in older records: read them on next open). */
+  adopted?: AdoptedAnnotation[];
   updatedAt: number;
+}
+
+export interface AdoptedAnnotation {
+  /** pdf.js annotation id, e.g. "12R". */
+  id: string;
+  page: number; // 0-based
+  popupRef: string | null;
+  /** Replies to it (other annotations that point at it), removed with it. */
+  replies?: { id: string; popupRef: string | null }[];
 }
 
 export type StoredCategory = typeof NOTES | typeof AI;
@@ -287,7 +302,7 @@ export function getNotes(id: string) {
 }
 
 export function saveNotes(notes: DocNotes, generation: number) {
-  const keep = notes.note.trim() || notes.marks.length || notes.bookmarkedPages?.length;
+  const keep = notes.note.trim() || notes.marks.length || notes.bookmarkedPages?.length || notes.adopted?.length;
   return saveStored(NOTES, notes.id, keep ? notes : undefined, generation);
 }
 

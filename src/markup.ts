@@ -1,12 +1,72 @@
 // Highlights, drawings, text boxes and notes as first-class, auto-saved document data.
 // pdf.js owns the on-page editors; this keeps a saved copy per document and recreates the
 // editors whenever the document is opened again.
-import { AnnotationEditorParamsType, AnnotationEditorType } from "pdfjs-dist";
+import { AnnotationEditorParamsType, AnnotationEditorType, AnnotationLayer, AnnotationType } from "pdfjs-dist";
 import type { EventBus, PDFViewer } from "./viewer";
 import type { PDFDocumentProxy } from "./pdf";
-import { getNotes, saveNotes, type DocNotes, type StoredMark } from "./recent";
+import { getNotes, saveNotes, type AdoptedAnnotation, type DocNotes, type StoredMark } from "./recent";
 
 export type Mark = StoredMark;
+
+export interface Reply { author: string; text: string }
+
+/**
+ * A note already in the PDF that Folio shows but doesn't edit: a sticky note, or a comment on an underline, shape or
+ * other annotation Folio can't redraw. It stays in the PDF exactly as it was.
+ */
+export interface OtherNote {
+  id: string;
+  page: number; // 0-based
+  kind: string;
+  /** The words it marks, when it marks text. */
+  text: string;
+  note: string;
+  author: string;
+  color: string;
+  rect: number[];
+  quadPoints?: number[];
+  /** False for sticky notes: the PDF draws their icon itself. */
+  icon: boolean;
+}
+
+/** Plain-data view of pdf.js's annotation records (getAnnotations). */
+interface PdfAnnotation {
+  id?: string;
+  annotationType: number;
+  subtype?: string;
+  rect: ArrayLike<number>;
+  quadPoints?: ArrayLike<number> | null;
+  color?: ArrayLike<number> | null;
+  opacity?: number;
+  rotation?: number;
+  contentsObj?: { str?: string };
+  titleObj?: { str?: string };
+  inReplyTo?: string;
+  popupRef?: string | null;
+  overlaidText?: string;
+  stateModel?: string | null;
+  hidden?: boolean;
+  noView?: boolean;
+  isEditable?: boolean;
+  folioAdopted?: boolean;
+  folioShown?: boolean;
+}
+
+const OTHER_KINDS: Partial<Record<number, string>> = {
+  [AnnotationType.TEXT]: "Sticky note", [AnnotationType.UNDERLINE]: "Underline", [AnnotationType.SQUIGGLY]: "Squiggly underline",
+  [AnnotationType.STRIKEOUT]: "Strikethrough", [AnnotationType.SQUARE]: "Box", [AnnotationType.CIRCLE]: "Circle",
+  [AnnotationType.LINE]: "Line", [AnnotationType.POLYGON]: "Shape", [AnnotationType.POLYLINE]: "Shape",
+  [AnnotationType.INK]: "Drawing", [AnnotationType.STAMP]: "Stamp", [AnnotationType.CARET]: "Insert text",
+  [AnnotationType.FILEATTACHMENT]: "Attachment", [AnnotationType.HIGHLIGHT]: "Highlight",
+};
+
+// pdf.js turns highlights already in a PDF into its own editable highlights whenever an editing tool is picked.
+// Folio shows the ones it has taken over as its own marks, so pdf.js must leave those alone.
+const layerProto = AnnotationLayer.prototype as unknown as { getEditableAnnotations(): { data: PdfAnnotation }[] };
+const editableAnnotations = layerProto.getEditableAnnotations;
+layerProto.getEditableAnnotations = function () {
+  return editableAnnotations.call(this).filter((element) => !element.data.folioAdopted);
+};
 
 const SAVED_TYPES: Record<string, Mark["type"]> = { highlight: "highlight", ink: "ink", freetext: "freetext" };
 
@@ -61,6 +121,10 @@ export interface MarkupState {
   marks: Mark[];
   note: string;
   bookmarkedPages: number[] | null;
+  /** Notes in the PDF that Folio shows read-only. */
+  others: OtherNote[];
+  /** Replies already in the PDF, by the id of the annotation they answer (a mark's source, or an OtherNote id). */
+  replies: Record<string, Reply[]>;
 }
 
 export class MarkupController {
@@ -79,6 +143,13 @@ export class MarkupController {
   #known = new Map<string, Mark>();
   #restoring = new Set<number>();
   #selectionText = "";
+  /** Annotations in the PDF that Folio shows as its own marks, by pdf.js id. */
+  #adopted = new Map<string, AdoptedAnnotation>();
+  /** Annotations pdf.js shouldn't draw: the highlights Folio draws itself, and replies (shown with their note). */
+  #suppressed = new Set<string>();
+  #others: OtherNote[] = [];
+  #replies: Record<string, Reply[]> = {};
+  #pdf: PDFDocumentProxy | null = null;
   #penWidth = 1;
   #syncTimer = 0;
   #saveTimer = 0;
@@ -112,6 +183,7 @@ export class MarkupController {
     bus.on("annotationeditorlayerrendered", ({ source, pageNumber }: { source: unknown; pageNumber: number }) => {
       if (source === this.#viewer.getPageView(pageNumber - 1)) void this.#restorePage(pageNumber - 1);
     });
+    bus.on("annotationlayerrendered", ({ pageNumber }: { pageNumber: number }) => this.#hidePdfPopups(pageNumber - 1));
     for (const name of ["editingstateschanged", "annotationeditormodechanged", "editingaction"]) {
       bus.on(name, () => this.scheduleSync());
     }
@@ -121,7 +193,7 @@ export class MarkupController {
   }
 
   get state(): MarkupState {
-    return { marks: this.#sorted(), note: this.#note, bookmarkedPages: this.#bookmarkedPages };
+    return { marks: this.#sorted(), note: this.#note, bookmarkedPages: this.#bookmarkedPages, others: this.#others, replies: this.#replies };
   }
 
   clearEditorSelection() {
@@ -145,7 +217,7 @@ export class MarkupController {
   }
 
   /** Loads saved markup for a newly opened document. Password-protected documents aren't persisted. */
-  async load(docId: string, persist: boolean, reading?: Pick<MarkupState, "note" | "bookmarkedPages">) {
+  async load(docId: string, persist: boolean, reading?: Pick<MarkupState, "note" | "bookmarkedPages">, pdf?: PDFDocumentProxy) {
     const readingGeneration = this.#storageGeneration;
     this.unload();
     const generation = this.#generation;
@@ -167,6 +239,13 @@ export class MarkupController {
     }
     this.#emit();
     if (reading) this.#scheduleSave();
+    if (pdf) {
+      this.#pdf = pdf;
+      // Highlights and notes already in the PDF: from another app, another person, or a copy saved by Folio.
+      const imported = await this.#readPdfNotes(pdf, generation, saved?.adopted).catch((e) => { console.warn("Couldn't read the notes already in this PDF.", e); return false; });
+      if (generation !== this.#generation) return;
+      if (imported) this.#scheduleSave();
+    }
     // Finish restoring visible pages before an export collects the marks still pending on other pages.
     await Promise.allSettled(Array.from(this.#pending.keys(), page => this.#restorePage(page)));
   }
@@ -187,9 +266,135 @@ export class MarkupController {
     this.#docId = null;
     this.#pending.clear();
     this.#known.clear();
+    this.#adopted.clear();
+    this.#suppressed.clear();
+    this.#others = [];
+    this.#replies = {};
+    this.#pdf = null;
     this.#note = "";
     this.#bookmarkedPages = null;
     this.#emit();
+  }
+
+  /**
+   * Reads the notes and highlights already in the PDF. Highlights become Folio marks (the first time this file is
+   * opened), so they can be recoloured, noted and deleted like any other; when a copy is saved they replace the
+   * originals in place, keeping their author and replies. Every other annotation with a note is shown read-only.
+   * Resolves true when it added marks.
+   */
+  async #readPdfNotes(pdf: PDFDocumentProxy, generation: number, adopted: AdoptedAnnotation[] | undefined) {
+    const all: { page: number; a: PdfAnnotation }[] = [];
+    for (let page = 0; page < pdf.numPages; page++) {
+      const list = await (await pdf.getPage(page + 1)).getAnnotations() as PdfAnnotation[];
+      if (generation !== this.#generation) return false;
+      // Replies count even when hidden: Folio shows them with the note they answer.
+      for (const a of list) if (a.id && /^\d+R\d*$/.test(a.id) && (a.inReplyTo || !a.hidden && !a.noView)) all.push({ page, a });
+    }
+    const text = (v?: { str?: string }) => (v?.str ?? "").replace(/\r\n?/g, "\n").trim();
+    const color = (c: PdfAnnotation["color"]) => c && c.length >= 3 ? toHex(Array.from(c)) : "#ffd84d";
+    const replies: Record<string, Reply[]> = {};
+    const replyIds = new Map<string, { id: string; popupRef: string | null }[]>();
+    for (const { a } of all) {
+      if (!a.inReplyTo) continue;
+      // Shown with the note they answer, so not also as an icon of their own.
+      this.#suppressed.add(a.id!);
+      replyIds.set(a.inReplyTo, [...replyIds.get(a.inReplyTo) ?? [], { id: a.id!, popupRef: a.popupRef ?? null }]);
+      // Review states ("Accepted", "Completed") are replies too, with no text of their own worth showing.
+      if (!a.stateModel && text(a.contentsObj)) (replies[a.inReplyTo] ??= []).push({ author: text(a.titleObj), text: text(a.contentsObj) });
+    }
+    const known = new Set((adopted ?? []).map((x) => x.id));
+    const fresh: Mark[] = [];
+    const others: OtherNote[] = [];
+    for (const { page, a } of all) {
+      if (a.inReplyTo) continue;
+      const isHighlight = a.annotationType === AnnotationType.HIGHLIGHT && a.quadPoints && a.quadPoints.length >= 8;
+      if (isHighlight && (known.has(a.id!) || !adopted)) {
+        a.folioAdopted = true;
+        const info = { id: a.id!, page, popupRef: a.popupRef ?? null, replies: replyIds.get(a.id!) };
+        this.#adopted.set(a.id!, info);
+        this.#suppressed.add(a.id!);
+        if (known.has(a.id!)) continue;
+        fresh.push({
+          id: newId(), type: "highlight", page, text: (a.overlaidText ?? "").replace(/\s+/g, " ").trim(),
+          note: text(a.contentsObj), color: color(a.color), createdAt: Date.now() + fresh.length, source: a.id,
+          ...(text(a.titleObj) && { author: text(a.titleObj) }),
+          data: { annotationType: AnnotationEditorType.HIGHLIGHT, color: Array.from(a.color ?? [255, 216, 77]), opacity: a.opacity ?? 1,
+            quadPoints: Array.from(a.quadPoints!), pageIndex: page, rect: Array.from(a.rect), rotation: a.rotation ?? 0 },
+        });
+        continue;
+      }
+      const kind = OTHER_KINDS[a.annotationType];
+      if (!kind || !text(a.contentsObj)) continue;
+      a.folioShown = true;
+      others.push({
+        id: a.id!, page, kind, text: (a.overlaidText ?? "").replace(/\s+/g, " ").trim(), note: text(a.contentsObj),
+        author: text(a.titleObj), color: color(a.color), rect: Array.from(a.rect),
+        ...(a.quadPoints && a.quadPoints.length >= 8 && { quadPoints: Array.from(a.quadPoints) }),
+        icon: a.annotationType !== AnnotationType.TEXT,
+      });
+    }
+    // Replies to a sticky note or other annotation, by the note they answer.
+    this.#replies = replies;
+    this.#others = others;
+    for (const mark of fresh) {
+      this.#known.set(mark.id, mark);
+      this.#pending.set(mark.page, [...this.#pending.get(mark.page) ?? [], mark]);
+    }
+    this.#emit();
+    if (this.#suppressed.size || others.length) {
+      // Pages drawn before this finished show the PDF's own copy of each highlight under Folio's: draw them again.
+      this.#hideOriginals(pdf);
+      for (let page = 0; page < this.#viewer.pagesCount; page++) this.#hidePdfPopups(page);
+    }
+    return fresh.length > 0;
+  }
+
+  /** Stops pdf.js drawing the highlights Folio has taken over (Folio draws them), and redraws pages already drawn. */
+  #hideOriginals(pdf: PDFDocumentProxy) {
+    const storage = pdf.annotationStorage as unknown as { modifiedIds: { ids: Set<string>; hash: string } };
+    const own = Object.getOwnPropertyDescriptor(storage, "modifiedIds");
+    const base = own?.get ?? Object.getOwnPropertyDescriptor(Object.getPrototypeOf(storage), "modifiedIds")?.get;
+    if (!base || own?.get?.name === "folioModifiedIds") {
+      // Already patched for this document: the set below is read live.
+    } else {
+      const suppressed = this.#suppressed;
+      let cache: { from: unknown; size: number; value: { ids: Set<string>; hash: string } } | null = null;
+      Object.defineProperty(storage, "modifiedIds", {
+        configurable: true,
+        get: function folioModifiedIds(this: unknown) {
+          const from = base.call(this) as { ids: Set<string>; hash: string };
+          if (!suppressed.size) return from;
+          if (cache?.from !== from || cache.size !== suppressed.size) {
+            cache = { from, size: suppressed.size, value: { ids: new Set([...from.ids, ...suppressed]), hash: `${from.hash}|folio:${[...suppressed].join(",")}` } };
+          }
+          return cache.value;
+        },
+      });
+    }
+    if (this.#viewer.pdfDocument === pdf) this.#viewer.refresh();
+  }
+
+  /**
+   * pdf.js's own pop-ups for notes Folio shows (Folio shows them its own way), and the clickable areas of the
+   * highlights it has taken over.
+   */
+  #hidePdfPopups(page: number) {
+    const div = (this.#viewer.getPageView(page) as unknown as { div?: HTMLElement } | undefined)?.div;
+    const layer = div?.querySelector<HTMLElement>(".annotationLayer");
+    if (!layer) return;
+    const ids = new Set(this.#suppressed);
+    for (const a of this.#adopted.values()) if (a.popupRef) ids.add(a.popupRef);
+    for (const element of layer.querySelectorAll<HTMLElement>("[data-annotation-id]")) {
+      const id = element.dataset.annotationId!;
+      if (ids.has(id) || element.classList.contains("popupAnnotation")
+        && this.#others.some((o) => o.page === page && element.getAttribute("aria-labelledby")?.includes(o.id))) element.hidden = true;
+    }
+    for (const other of this.#others) {
+      if (other.page !== page) continue;
+      const element = layer.querySelector<HTMLElement>(`[data-annotation-id="${other.id}"]`);
+      // Keep the element (a sticky note's icon may be drawn by it), but not pdf.js's pop-up on click or hover.
+      if (element) element.classList.add("folio-note-source");
+    }
   }
 
   clearSaved(generation: number) {
@@ -350,6 +555,8 @@ export class MarkupController {
         note: comment && !comment.deleted ? comment.text ?? "" : previous?.note ?? "",
         color: toHex(data.color),
         createdAt: previous?.createdAt ?? Date.now(),
+        ...(previous?.source && { source: previous.source }),
+        ...(previous?.author && { author: previous.author }),
         data: { ...data, id: undefined, popupRef: undefined },
       };
       live.set(mark.id, mark);
@@ -390,7 +597,7 @@ export class MarkupController {
     window.clearTimeout(this.#saveTimer);
     if (!this.#persist || !this.#docId) return;
     const notes: DocNotes = { id: this.#docId, note: this.#note, marks: [...this.#known.values()],
-      bookmarkedPages: this.#bookmarkedPages ?? [], updatedAt: Date.now() };
+      bookmarkedPages: this.#bookmarkedPages ?? [], adopted: [...this.#adopted.values()], updatedAt: Date.now() };
     return saveNotes(notes, this.#storageGeneration);
   }
 
@@ -410,10 +617,49 @@ export class MarkupController {
         const top = (mark.data.rect as number[] | undefined)?.[3];
         // The pop-up pdf.js gives an editor's comment (see AnnotationEditor.addComment).
         if (mark.note && top !== undefined) data.popup = { contents: mark.note, deleted: false, rect: [pageRight + 1, top - 100, pageRight + 181, top] };
-        marks.push(data);
+        marks.push(this.#replacing(mark, data));
       }
     }
+    // Highlights taken over from the PDF and since deleted: remove the originals, and the replies to them.
+    const live = new Set([...this.#known.values()].map((m) => m.source).filter(Boolean));
+    for (const a of this.#adopted.values()) {
+      if (live.has(a.id)) continue;
+      for (const r of [a, ...a.replies ?? []]) marks.push({ id: r.id, popupRef: r.popupRef, pageIndex: a.page, deleted: true });
+    }
     return marks;
+  }
+
+  /** A taken-over highlight's saved data, set to replace its original in the PDF (keeping its author and replies). */
+  #replacing(mark: Mark, data: Record<string, unknown>) {
+    const original = mark.source ? this.#adopted.get(mark.source) : undefined;
+    if (!original) return data;
+    data.id = original.id;
+    data.popupRef = original.popupRef;
+    // A note that was cleared: remove the original's note too, not just leave it unchanged.
+    if (!mark.note && !data.popup) data.popup = { deleted: true };
+    return data;
+  }
+
+  /**
+   * While a copy is saved or printed, Folio's highlights that came from the PDF replace their originals instead of
+   * being added next to them. Returns the undo.
+   */
+  replaceOriginalsWhileSaving(): () => void {
+    const undo: (() => void)[] = [];
+    for (const editor of this.#liveEditors()) {
+      const mark = editor.__folioMark ? this.#known.get(editor.__folioMark) : undefined;
+      if (!mark?.source || !this.#adopted.has(mark.source)) continue;
+      const own = Object.prototype.hasOwnProperty.call(editor, "serialize") ? editor.serialize : undefined;
+      const serialize = editor.serialize;
+      editor.serialize = (isForCopying?: boolean, ...rest: unknown[]) => {
+        const data = (serialize as (...args: unknown[]) => Record<string, unknown> | null).call(editor, isForCopying, ...rest);
+        if (!data || isForCopying || data.deleted) return data;
+        const current = this.#known.get(mark.id) ?? mark;
+        return this.#replacing(current, { ...data });
+      };
+      undo.push(() => { if (own) editor.serialize = own; else delete (editor as Partial<Editor>).serialize; });
+    }
+    return () => undo.forEach((u) => u());
   }
 
   /** Highlights the current text selection in one click. Resolves to the new mark's id. */

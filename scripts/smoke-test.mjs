@@ -18,6 +18,7 @@ import { checkSignatureTargets } from "./smoke-signature-targets.mjs";
 import { checkOpenRouter } from "./smoke-openrouter.mjs";
 import { checkCustomEndpoint } from "./smoke-custom-endpoint.mjs";
 import { checkAiComments } from "./smoke-ai-comments.mjs";
+import { checkPdfNotes } from "./smoke-pdf-notes.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const require = createRequire(import.meta.url);
@@ -141,6 +142,7 @@ try {
   await checkOpenRouter(app, page);
   await checkCustomEndpoint(app, page);
   await checkAiComments(app, page);
+  await checkPdfNotes(app, page, env.FOLIO_TEST_USER_DATA);
 
   const toolbar = page.getByRole("toolbar", { name: "Tools" });
   for (const name of ["Select", "Highlight", "Draw", "Text", "Sign", "Edit mode"]) await toolbar.getByRole("button", { name, exact: true }).waitFor();

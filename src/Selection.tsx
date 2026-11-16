@@ -241,25 +241,38 @@ interface NotePeekProps {
   anchor: { x: number; top: number; bottom: number };
   stageWidth: number;
   note: string;
+  author?: string;
+  replies?: { author: string; text: string }[];
   page: number;
   color: string;
-  onEdit: () => void;
+  /** Absent for notes Folio shows but doesn't edit (a sticky note added in another app). */
+  onEdit?: () => void;
   /** The pointer is over the pop-up, so it stays open for reading and scrolling. */
   onEnter: () => void;
   onLeave: () => void;
 }
 
 /** A note shown over the page while hovering its highlight or note icon, like a PDF editor's comment pop-up. */
-export function NotePeek({ anchor, stageWidth, note, page, color, onEdit, onEnter, onLeave }: NotePeekProps) {
+export function NotePeek({ anchor, stageWidth, note, author, replies, page, color, onEdit, onEnter, onLeave }: NotePeekProps) {
   // Room for the text up to the scrolling limit, so the card opens above the highlight when it fits there.
-  const height = Math.min(260, 52 + Math.ceil(note.length / 42) * 20);
+  const length = note.length + (replies ?? []).reduce((n, r) => n + r.text.length + 60, 0);
+  const height = Math.min(260, 52 + (author ? 18 : 0) + Math.ceil(length / 42) * 20);
   return (
     <div className="note-peek" role="tooltip" style={{ ...place(anchor, 320, height, stageWidth), "--mark": color } as React.CSSProperties}
       onMouseEnter={onEnter} onMouseLeave={onLeave}>
-      <div className="note-peek-text">{note}</div>
+      <div className="note-peek-text">
+        {author && <div className="note-author">{author}</div>}
+        {note}
+        {replies?.map((reply, i) => (
+          <div className="note-reply" key={i}>
+            {reply.author && <div className="note-author">{reply.author}</div>}
+            {reply.text}
+          </div>
+        ))}
+      </div>
       <div className="note-peek-foot">
         <span>p. {page}</span>
-        <button className="link small" onClick={onEdit}>Edit</button>
+        {onEdit && <button className="link small" onClick={onEdit}>Edit</button>}
       </div>
     </div>
   );

@@ -23,7 +23,7 @@ import { Welcome } from "./Welcome";
 import { Sidebar, type SidebarTab } from "./Sidebar";
 import { MarkupController, type Mark, type MarkupState } from "./markup";
 import { HighlightMenu, NoteBox, NotePeek, SelectionPopover, useTextSelection, type SelectionInfo } from "./Selection";
-import { drawNoteMarkers, hasNote } from "./noteMarkers";
+import { drawNoteMarkers, hasNote, otherAt } from "./noteMarkers";
 import { NotesPanel } from "./NotesPanel";
 import { notesJson, notesMarkdown } from "./noteExport";
 import { copyText } from "./clipboard";
@@ -248,7 +248,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
   const [signing, setSigning] = useState(false);
   const [signatureTargets, setSignatureTargets] = useState<SignatureTarget[]>([]);
   const [signatureDismissed, setSignatureDismissed] = useState(false);
-  const [markup, setMarkup] = useState<MarkupState>({ marks: [], note: "", bookmarkedPages: null });
+  const [markup, setMarkup] = useState<MarkupState>({ marks: [], note: "", bookmarkedPages: null, others: [], replies: {} });
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("pages");
   const [noteBox, setNoteBox] = useState<{ markId: string; anchor: { x: number; top: number; bottom: number }; quote: string; initial: string } | null>(null);
   const [stageWidth, setStageWidth] = useState(800);
@@ -315,6 +315,8 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
       // Records where images are drawn (used to keep them true to color in night reading). The huge
       // minimum size turns off pdf.js's own right-click image targets, which Folio doesn't use.
       imagesRightClickMinSize: 1e9,
+      // Icons for sticky notes that a PDF doesn't draw itself.
+      imageResourcesPath: `${import.meta.env.BASE_URL}pdfjs/images/`,
     });
     trackPageImages(eventBus);
     const stopDrawingPointer = keepDrawingPointer(container);
@@ -488,7 +490,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
           reading.bookmarkedPages = exportedOrder.flatMap((n, i) => bookmarks.has(n) ? [i + 1] : []);
         }
         persistRef.current = !password && !revision;
-        const markupReady = markupRef.current!.load(id, persistRef.current, reading);
+        const markupReady = markupRef.current!.load(id, persistRef.current, reading, pdf);
         const next: OpenDoc = { id, name, size: data.byteLength, pdf, password, markupReady, sourceId: revision?.sourceId ?? revision?.id, historyAllowed, edits };
         docRef.current = next;
         setNoteBox(null);
@@ -872,6 +874,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
   useEffect(() => { setImageMenu(null); setImageView(null); }, [doc]);
   const menuMark = highlightMenu ? markup.marks.find((m) => m.id === highlightMenu.id) : undefined;
   const peekMark = notePeek ? markup.marks.find((m) => m.id === notePeek.id && hasNote(m)) : undefined;
+  const peekOther = notePeek && !peekMark ? markup.others.find((o) => o.id === notePeek.id) : undefined;
 
   const removeHighlight = (id: string) => {
     markupRef.current!.remove(id);
@@ -913,14 +916,14 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
   // Note icons on the page: drawn for the current notes, and again whenever pdf.js redraws a page (which clears them).
   useEffect(() => {
     const viewer = viewerRef.current;
-    if (viewer?.pdfDocument) drawNoteMarkers(viewer, markup.marks);
+    if (viewer?.pdfDocument) drawNoteMarkers(viewer, markup.marks, markup.others);
   }, [markup, doc, scale, rotation]);
   useEffect(() => {
     const bus = busRef.current;
     if (!bus) return;
     const redraw = () => {
-      const viewer = viewerRef.current, marks = markupRef.current?.state.marks;
-      if (viewer?.pdfDocument && marks) drawNoteMarkers(viewer, marks);
+      const viewer = viewerRef.current, state = markupRef.current?.state;
+      if (viewer?.pdfDocument && state) drawNoteMarkers(viewer, state.marks, state.others);
     };
     bus.on("pagerendered", redraw);
     return () => bus.off("pagerendered", redraw);
@@ -948,10 +951,14 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
       const e = last;
       if (!e || toolRef.current !== "select" || e.buttons) return hide();
       const marker = (e.target as HTMLElement).closest<HTMLElement>(".folio-note-marker");
-      if (marker?.dataset.mark) return show(marker.dataset.mark, marker.getBoundingClientRect());
+      const markerId = marker?.dataset.mark ?? marker?.dataset.other;
+      if (markerId) return show(markerId, marker!.getBoundingClientRect());
       const hit = markupRef.current?.markAt(e.clientX, e.clientY);
       const mark = hit && markupRef.current!.state.marks.find((m) => m.id === hit.id);
       if (hit && mark && hasNote(mark)) return show(hit.id, hit.rect);
+      // Notes already in the PDF that Folio shows read-only: a sticky note's icon, or the words an underline marks.
+      const other = viewerRef.current && otherAt(viewerRef.current, markupRef.current?.state.others ?? [], e.clientX, e.clientY);
+      if (other) return show(other.id, other.rect);
       hide();
     };
     const onMove = (e: MouseEvent) => { last = e; if (!frame) frame = requestAnimationFrame(check); };
@@ -1020,6 +1027,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
     // (pdf.js saves only entries keyed with its editor prefix.)
     const storage = doc.pdf.annotationStorage;
     const keys: string[] = [];
+    let restoreSerialize: (() => void) | undefined;
     try {
       await doc.markupReady;
       if (docRef.current !== doc) return null;
@@ -1030,9 +1038,12 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
         keys.push(key);
       }
       const annotated = storage.size > 0;
+      // Highlights that came from the PDF itself replace their originals rather than being added next to them.
+      restoreSerialize = markupRef.current!.replaceOriginalsWhileSaving();
       if (pages?.length) return { bytes: await copyPdfPages(doc.pdf, pages, signal, doc.password), annotated };
       return { bytes: annotated ? await doc.pdf.saveDocument() : await doc.pdf.getData(), annotated };
     } finally {
+      restoreSerialize?.();
       for (const key of keys) storage.remove(key);
       if (exporting.current === doc.pdf) exporting.current = null;
     }
@@ -1591,6 +1602,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
                 onRemove={(id) => markupRef.current!.remove(id)}
                 onDocNote={(note) => markupRef.current!.setDocNote(note)}
                 onAsk={(mark: Mark) => askAbout(mark.text, mark.page + 1)}
+                onPage={(n) => goTo(n)}
               />
             }
           />
@@ -1740,20 +1752,22 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
               onRemove={() => removeHighlight(menuMark.id)}
             />
           )}
-          {notePeek && peekMark && !noteBox && !highlightMenu && !selection && (
+          {notePeek && (peekMark || peekOther) && !noteBox && !highlightMenu && !selection && (
             <NotePeek
               key={notePeek.id}
               anchor={notePeek.anchor}
               stageWidth={stageWidth}
-              note={peekMark.note}
-              page={peekMark.page + 1}
-              color={peekMark.color}
+              note={(peekMark ?? peekOther)!.note}
+              author={(peekMark ?? peekOther)!.author}
+              replies={markup.replies[peekMark ? peekMark.source ?? "" : peekOther!.id]}
+              page={(peekMark ?? peekOther)!.page + 1}
+              color={(peekMark ?? peekOther)!.color}
               onEnter={() => window.clearTimeout(peekTimer.current)}
               onLeave={() => { window.clearTimeout(peekTimer.current); peekTimer.current = window.setTimeout(() => setNotePeek(null), 220); }}
-              onEdit={() => {
+              onEdit={peekMark && (() => {
                 setNoteBox({ markId: peekMark.id, anchor: notePeek.anchor, quote: peekMark.text, initial: peekMark.note });
                 setNotePeek(null);
-              }}
+              })}
             />
           )}
           {noteBox && (

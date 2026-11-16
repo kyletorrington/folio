@@ -1,6 +1,6 @@
 // Copies pdf.js runtime assets (CJK cmaps, standard fonts, wasm decoders, ICC profiles) into public/.
 // quickjs-eval.* runs JavaScript embedded in PDFs, which Folio never does, so it stays out.
-import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { basename, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
@@ -12,6 +12,11 @@ rmSync(dest, { recursive: true, force: true });
 for (const dir of ["cmaps", "standard_fonts", "wasm", "iccs"]) {
   const from = resolve(src, dir);
   if (existsSync(from)) cpSync(from, resolve(dest, dir), { recursive: true, filter: (file) => !basename(file).startsWith("quickjs-eval") });
+}
+// Icons for sticky notes and other comments that a PDF doesn't draw itself.
+mkdirSync(resolve(dest, "images"), { recursive: true });
+for (const file of readdirSync(resolve(src, "web/images"))) {
+  if (file.startsWith("annotation-")) cpSync(resolve(src, "web/images", file), resolve(dest, "images", file));
 }
 // Worker-only packages aren't included in Vite's renderer license report.
 for (const [pkg, license] of [
