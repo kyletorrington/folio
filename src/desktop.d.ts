@@ -12,11 +12,14 @@ interface FolioDesktop {
   printSheets(job: { images: string[]; paper: "Letter" | "A4" | "Legal"; landscape: boolean; dpi: 150 | 300 | 600;
     copies: number; printer: string; booklet: boolean }): Promise<{ ok: boolean; error?: string }>;
   /** `note` says where a converted Word document's PDF was saved. */
-  onOpenFile(callback: (name: string, data: Uint8Array, note?: string, token?: string) => void): () => void;
+  onOpenFile(callback: (name: string, data: Uint8Array, note?: string, token?: string, path?: string) => void): () => void;
   onConverting(callback: (name: string, token: string) => void): () => void;
   onOpenFailed(callback: (message: string, token: string) => void): () => void;
   onTabCommand(callback: (command: "new" | "close" | "next" | "previous") => void): () => void;
   openDocument(file: File): Promise<{ name: string; data: Uint8Array; note?: string }>;
+  pathForFile(file: File): string;
+  linkFile(path: string, sha256: string): Promise<string | null>;
+  saveFile(ref: string, bytes: Uint8Array, force?: boolean): Promise<{ ok?: true; conflict?: "changed" | "missing"; error?: string }>;
   ready(): Promise<boolean>;
   /** Null when the user declines to open an address on their computer or local network, or the request is stopped. */
   fetchPdf(url: string, id: string): Promise<{ name: string; data: Uint8Array } | null>;
@@ -42,6 +45,8 @@ interface FolioDesktop {
 
 interface AiStatus {
   openrouter: { configured: boolean };
+  /** An OpenAI API key is saved for voice typing (absent from older shells). */
+  dictation?: { configured: boolean };
   custom: CustomEndpointStatus;
   chatgpt: { connected: boolean; email: string; name: string; welcomeSeen: boolean; encrypted: boolean };
   claude: { installed: boolean; loggedIn: boolean; version?: string; subscription?: boolean; authMethod?: string };
@@ -75,6 +80,8 @@ interface FolioAi {
   openRouterModels(): Promise<{ ok: boolean; models?: OpenRouterModel[]; error?: string }>;
   customEndpoint(action: "save" | "check" | "remove", input?: { baseUrl: string; key: string }): Promise<{ ok: boolean; status?: CustomEndpointStatus; error?: string }>;
   customModels(): Promise<{ ok: boolean; models?: OpenRouterModel[]; error?: string }>;
+  dictationKey(action: "save" | "check" | "remove", key?: string): Promise<{ ok: boolean; configured?: boolean; error?: string }>;
+  dictate(bytes: Uint8Array, mime: string, documentName: string): Promise<{ ok?: true; text?: string; error?: string; code?: string }>;
   ask(request: { id: string; provider: "chatgpt" | "claude" | "openrouter" | "custom"; model: string; document: { name: string; text: string; truncated: boolean; recognized: boolean };
     messages: AiMessage[] }): Promise<boolean>;
   cancel(id: string): Promise<boolean>;

@@ -19,6 +19,7 @@ import { checkOpenRouter } from "./smoke-openrouter.mjs";
 import { checkCustomEndpoint } from "./smoke-custom-endpoint.mjs";
 import { checkAiComments } from "./smoke-ai-comments.mjs";
 import { checkPdfNotes } from "./smoke-pdf-notes.mjs";
+import { checkSaveFile } from "./smoke-save-file.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const require = createRequire(import.meta.url);
@@ -32,7 +33,8 @@ delete env.ELECTRON_RUN_AS_NODE;
 const executablePath = electronPath(env);
 // Containers often run as root, where Chromium's sandbox can't start. The made-up names stand in for web addresses
 // that lead to this computer (see the local network checks below).
-const args = [root, "--mute-audio", "--host-resolver-rules=MAP folio-local.test 127.0.0.1, MAP folio-rebind.test 127.0.0.1, MAP folio-pinned.test 127.0.0.2",
+// A pretend microphone (a tone) for voice typing; the real one is never opened by a test.
+const args = [root, "--mute-audio", "--use-fake-device-for-media-stream", "--host-resolver-rules=MAP folio-local.test 127.0.0.1, MAP folio-rebind.test 127.0.0.1, MAP folio-pinned.test 127.0.0.2",
   ...(process.platform === "linux" && process.getuid?.() === 0 ? ["--no-sandbox"] : [])];
 
 // The smallest .docx Word opens: one paragraph of `text`.
@@ -143,6 +145,7 @@ try {
   await checkCustomEndpoint(app, page);
   await checkAiComments(app, page);
   await checkPdfNotes(app, page, env.FOLIO_TEST_USER_DATA);
+  await checkSaveFile(app, page, env.FOLIO_TEST_USER_DATA);
 
   const toolbar = page.getByRole("toolbar", { name: "Tools" });
   for (const name of ["Select", "Highlight", "Draw", "Text", "Sign", "Edit mode"]) await toolbar.getByRole("button", { name, exact: true }).waitFor();
@@ -721,7 +724,8 @@ try {
       item.once("done", (_done, state) => resolve(state));
     }));
   }, scannedCopy);
-  await page.keyboard.press("ControlOrMeta+s");
+  // Opened from a file, so Ctrl+S would save it in place; Shift makes it a copy.
+  await page.keyboard.press("ControlOrMeta+Shift+s");
   await page.getByText("Saved a copy with the recognized text").waitFor({ timeout: 60_000 });
   assert.equal(await app.evaluate(() => globalThis.folioScanSaved), "completed");
   assert.equal(readFileSync(scannedCopy).subarray(0, 5).toString("latin1"), "%PDF-");

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Modal } from "./Dialogs";
 import { CLAUDE_CODE_URL, PROVIDERS, savedProvider, saveAiPreference, signInChatGPT, USAGE_URL, type AiProvider } from "./ai";
 import { OpenRouterSettings } from "./OpenRouterSettings";
+import { VoiceSettings } from "./VoiceSettings";
 import { CustomEndpointSettings } from "./CustomEndpointSettings";
 import { updateSummary } from "./updates";
 import { ScanLanguagePicker } from "./ScanLanguagePicker";
@@ -261,6 +262,8 @@ export function SettingsDialog({ initialSection = "General", theme, onTheme, nig
               onConfigured={configured => setAiStatus({ ...aiStatus, openrouter: { configured } })} /> : <p className="settings-hint">Checking connection…</p>)}
             {provider === "custom" && (aiStatus ? <CustomEndpointSettings ai={ai} status={aiStatus.custom}
               onStatus={custom => setAiStatus({ ...aiStatus, custom })} /> : <p className="settings-hint">Checking connection…</p>)}
+            {aiStatus && <VoiceSettings ai={ai} configured={!!aiStatus.dictation?.configured}
+              onConfigured={configured => setAiStatus({ ...aiStatus, dictation: { configured } })} />}
           </section>
         )}
 

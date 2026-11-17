@@ -103,7 +103,7 @@ export function NotesPanel({ state, onExport, persisted, onReveal, onNote, onRem
       )}
       {other > 0 && <p className="notes-foot">Plus {other} drawing{other === 1 ? "" : "s"} on the pages.</p>}
       <p className="notes-foot">
-        {keys(persisted ? "Saved automatically on this computer. Ctrl+S saves a PDF copy that includes them."
+        {keys(persisted ? "Saved automatically on this computer. Ctrl+S also puts them in the PDF, so they go with the file."
           : "Password-protected documents aren't saved in Folio. Use Ctrl+S to keep a copy with your highlights.")}
       </p>
     </div>

@@ -173,6 +173,9 @@
       ],
       "identity": "-",
       "hardenedRuntime": false,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Folio uses the microphone only while you dictate a question to Ask AI."
+      },
       "artifactName": "Folio-mac.${ext}"
     },
     "dmg": {

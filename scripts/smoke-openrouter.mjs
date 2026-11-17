@@ -19,6 +19,16 @@ export async function checkOpenRouter(app, page) {
     safeStorage.decryptStringAsync = async bytes => ({ result: Buffer.from(bytes).map(b => b ^ 128).toString() });
     const state = globalThis.routerTest = { calls: [], cancelled: false, hold: false };
     net.fetch = async (url, options) => {
+      if (String(url).startsWith("https://api.openai.com/v1/")) {
+        const endpoint = new URL(url).pathname;
+        state.calls.push(endpoint);
+        if (options.headers.Authorization !== "Bearer fixture-only-openai-key") return Response.json({ error: {} }, { status: 401 });
+        if (endpoint === "/v1/models") return Response.json({ data: [] });
+        if (endpoint !== "/v1/audio/transcriptions") throw new Error("Unexpected OpenAI endpoint");
+        const audio = options.body.get("file");
+        state.dictation = { model: options.body.get("model"), type: audio.type, size: audio.size, prompt: options.body.get("prompt") };
+        return Response.json({ text: "Where do the terns nest?" });
+      }
       if (!String(url).startsWith("https://openrouter.ai/")) return fetch.call(net, url, options);
       const endpoint = new URL(url).pathname;
       state.calls.push(endpoint);
@@ -50,7 +60,7 @@ export async function checkOpenRouter(app, page) {
     assert.equal(await settings.getByRole("button", { name: "Ask AI", exact: true }).getAttribute("aria-current"), "page");
     assert.deepEqual(await app.evaluate(() => globalThis.routerTest.calls), []);
     await settings.getByLabel("API key", { exact: true }).fill("fixture-only-openrouter-key");
-    await settings.getByRole("button", { name: "Verify and save" }).click();
+    await settings.locator(".router-settings:not(.voice-settings)").getByRole("button", { name: "Verify and save" }).click();
     const filter = settings.getByRole("searchbox", { name: "Model" });
     await filter.fill("reader");
     await settings.getByRole("button", { name: /Sample Reader/ }).click();
@@ -92,6 +102,40 @@ export async function checkOpenRouter(app, page) {
     assert.deepEqual(withImages.content.map(part => part.type), ["text", "image_url", "image_url"]);
     assert.equal(withImages.content[1].image_url.url, `data:image/png;base64,${png}`);
     await panel.getByRole("button", { name: "(p. 2)" }).nth(1).waitFor();
+    // Voice typing: without a key it points to Settings; with one, a recording from the microphone (Chromium's
+    // pretend one in tests) is written out at the end of the box, and nothing is sent.
+    await panel.getByRole("button", { name: "Dictate", exact: true }).click();
+    await panel.getByText("Voice typing needs an OpenAI API key").waitFor();
+    await panel.getByRole("button", { name: "Open settings" }).click();
+    await settings.getByLabel("OpenAI API key", { exact: true }).fill("fixture-only-openai-key");
+    await settings.locator(".voice-settings").getByRole("button", { name: "Verify and save" }).click();
+    await settings.locator(".voice-settings").getByRole("button", { name: "Manage key" }).waitFor();
+    await settings.getByRole("button", { name: "Close" }).click();
+    await panel.getByRole("textbox").fill("Field notes:");
+    const sentBefore = await app.evaluate(() => globalThis.routerTest.calls.filter(c => c.endsWith("completions")).length);
+    // The panel rereads the key's status once Settings saves it.
+    const stop = panel.getByRole("button", { name: "Stop dictating" });
+    for (let i = 0; i < 20 && !(await stop.isVisible()); i++) {
+      await panel.getByRole("button", { name: "Dictate", exact: true }).click();
+      await stop.waitFor({ timeout: 500 }).catch(() => {});
+    }
+    await page.waitForTimeout(1500);
+    await stop.click();
+    await page.waitForFunction(() => document.querySelector('[aria-label="Ask AI"] textarea')?.value === "Field notes: Where do the terns nest?");
+    const heard = await app.evaluate(() => globalThis.routerTest.dictation);
+    assert.equal(heard.model, "gpt-transcribe");
+    assert.match(heard.type, /^audio\/(webm|ogg|mp4)$/);
+    assert.ok(heard.size > 1000, `the recording was ${heard.size} bytes`);
+    assert.match(heard.prompt, /Field notes/);
+    assert.equal(await app.evaluate(() => globalThis.routerTest.calls.filter(c => c.endsWith("completions")).length), sentBefore);
+    await panel.getByRole("textbox").fill("");
+    // Remove the voice key again, so later checks see Settings as they left it.
+    await panel.getByRole("button", { name: "sample/reader", exact: true }).click();
+    const voice = settings.locator(".voice-settings");
+    await voice.getByRole("button", { name: "Manage key" }).click();
+    await voice.getByRole("button", { name: "Remove saved key" }).click();
+    await voice.getByLabel("OpenAI API key", { exact: true }).waitFor();
+    await settings.getByRole("button", { name: "Close" }).click();
     await app.evaluate(() => { globalThis.routerTest.hold = true; });
     await panel.getByRole("textbox").fill("Continue");
     await panel.getByRole("button", { name: "Send", exact: true }).click();
@@ -112,6 +156,6 @@ export async function checkOpenRouter(app, page) {
     await settings.getByLabel("Ask AI provider").selectOption("chatgpt");
     await settings.getByRole("button", { name: "Close" }).click();
     await page.getByRole("tablist", { name: "Open documents" }).getByRole("button", { name: "Close Field notes.pdf" }).click();
-    console.log("ok  OpenRouter setup, models, streaming, citations, images, Stop, provider switching and key removal");
+    console.log("ok  OpenRouter setup, models, streaming, citations, images, voice typing, Stop, provider switching and key removal");
   } finally { await app.evaluate(() => { globalThis.routerTest.restore(); delete globalThis.routerTest; }); }
 }

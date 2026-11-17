@@ -16,6 +16,7 @@ const path = require("node:path");
 const { chatRequest, claudePrompt } = require("./ai-prompt.cjs");
 const { createOpenRouter } = require("./openrouter.cjs");
 const { createCustomEndpoint } = require("./custom-endpoint.cjs");
+const { createDictation } = require("./dictation.cjs");
 const { guardSession, resolveDestination } = require("./network.cjs");
 const { claudeChildPath, findClaude: lookUpClaude } = require("./claude-path.cjs");
 
@@ -31,6 +32,7 @@ const REFRESH_FAILURES = new Set(["invalid_grant", "invalid_refresh_token", "tok
 const dir = () => path.join(app.getPath("userData"), "ai");
 const file = (name) => path.join(dir(), name);
 const openRouter = createOpenRouter({ net, safeStorage, file, writeAtomic });
+const dictation = createDictation({ net, safeStorage, file, writeAtomic });
 // Set by register(): main.cjs owns the window, so it shows the local-address question.
 let confirmLocalAddress = async () => false;
 const customEndpoint = createCustomEndpoint({ fetch: endpointFetch, resolve: (url) => resolveDestination(url, sessions.defaultSession),
@@ -574,7 +576,17 @@ function register(handle, send, { confirmLocal } = {}) {
   if (confirmLocal) confirmLocalAddress = confirmLocal;
   cleanStaleClaudeFolders();
   handle("folio:ai-status", async () => ({ chatgpt: await chatgptStatus(), claude: await claudeStatus(), openrouter: openRouter.status(),
-    custom: customEndpoint.status() }));
+    custom: customEndpoint.status(), dictation: dictation.status() }));
+  handle("folio:ai-dictation-key", async (_event, action, key) => {
+    try {
+      if (action === "save") await dictation.save(key);
+      else if (action === "remove") await dictation.remove();
+      else if (action === "check") await dictation.check();
+      else throw new Error("Unknown key action.");
+      return { ok: true, configured: dictation.status().configured };
+    } catch (error) { return { ok: false, error: error.message }; }
+  });
+  handle("folio:ai-dictate", (_event, bytes, mime, documentName) => dictation.transcribe(bytes, mime, documentName));
   handle("folio:ai-router-key", async (_event, action, key) => {
     try {
       if (action === "save") await openRouter.save(key);

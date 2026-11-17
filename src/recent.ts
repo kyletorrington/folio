@@ -9,6 +9,8 @@ export interface RecentFile {
   lastPage: number;
   thumb: string;
   data: Blob;
+  /** Where it was opened from on disk, so Save can write back to it when it's reopened from Recent. */
+  path?: string;
 }
 
 const DB_NAME = "folio";

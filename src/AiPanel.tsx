@@ -10,6 +10,7 @@ import { Modal } from "./Dialogs";
 import { readSetting } from "./preferences";
 import { splitComments, type AiComment, type PlacedComment } from "./aiComments";
 import { imageUrl, isChatImageType, limitImages, MAX_IMAGES_PER_QUESTION, prepareImage, validChatImage, type ChatImage } from "./chatImages";
+import { appendWords, cancelRecording, canRecord, recordingState, startRecording, stopRecording } from "./dictation";
 
 const AiMarkdown = lazy(() => import("./AiMarkdown").then((module) => ({ default: module.AiMarkdown })));
 
@@ -209,6 +210,12 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
   const [dropping, setDropping] = useState(false);
   const dropDepth = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Voice typing: one tap records, the next writes the words out at the end of the box. Nothing is sent.
+  const [voice, setVoice] = useState<"starting" | "recording" | "working" | null>(null);
+  const [voiceLevel, setVoiceLevel] = useState(0);
+  const [voiceNotice, setVoiceNotice] = useState<{ text: string; settings?: boolean } | null>(null);
+  const voiceTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => { window.clearInterval(voiceTimer.current); cancelRecording(); }, []);
   const busyRef = useRef<string | null>(null);
   const preparing = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -350,6 +357,57 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
     setAttachments((list) => [...list, ...added].slice(0, MAX_IMAGES_PER_QUESTION));
     inputRef.current?.focus();
   }, [attachments.length]);
+
+  const stopDictating = async () => {
+    window.clearInterval(voiceTimer.current);
+    setVoice("working");
+    setVoiceLevel(0);
+    try {
+      const recording = await stopRecording();
+      if ("error" in recording) { setVoiceNotice({ text: recording.error }); return; }
+      if (recording.ms < 500) { setVoiceNotice({ text: "Too short to make anything out." }); return; }
+      const result = await ai!.dictate(recording.bytes, recording.mime, docName);
+      if (!result.ok) { setVoiceNotice({ text: result.error ?? "The words couldn't be made out.", settings: result.code === "no_key" }); return; }
+      if (!result.text) {
+        setVoiceNotice({ text: recording.peak < 0.02
+          ? `No sound came from the microphone${recording.mic ? ` (“${recording.mic}”)` : ""}. Check which microphone your computer is using.`
+          : "No words were heard." });
+        return;
+      }
+      setInput((box) => appendWords(box, result.text!));
+      requestAnimationFrame(() => {
+        const box = inputRef.current;
+        if (!box) return;
+        box.focus();
+        box.setSelectionRange(box.value.length, box.value.length);
+        box.scrollTop = box.scrollHeight;
+      });
+    } catch {
+      setVoiceNotice({ text: "Folio couldn't write out what you said." });
+    } finally {
+      setVoice(null);
+    }
+  };
+
+  const dictate = async () => {
+    if (voice === "recording") return stopDictating();
+    if (voice || !ai) return;
+    setVoiceNotice(null);
+    if (!status?.dictation?.configured) {
+      setVoiceNotice({ text: "Voice typing needs an OpenAI API key. Add one in Ask AI settings.", settings: true });
+      return;
+    }
+    setVoice("starting");
+    const started = await startRecording();
+    if ("error" in started) { setVoice(null); setVoiceNotice({ text: started.error }); return; }
+    setVoice("recording");
+    // How loud, for the glow; and whether it stopped by itself at ten minutes, in which case what there is is written out.
+    voiceTimer.current = window.setInterval(() => {
+      const now = recordingState();
+      setVoiceLevel(now.level);
+      if (!now.recording) void stopDictating();
+    }, 200);
+  };
 
   const send = useCallback(async (question: string) => {
     if (!ai || (!question.trim() && !attachments.length) || busyRef.current || !ready) return;
@@ -585,6 +643,8 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
           </ul>
         )}
         {attachError && <p className="ai-attach-error" role="status">{attachError}</p>}
+        {voiceNotice && <p className="ai-attach-error" role="status">{voiceNotice.text}
+          {voiceNotice.settings && <> <button type="button" className="link small" onClick={onSettings}>Open settings</button></>}</p>}
         <form
           className="composer"
           onSubmit={(e) => {
@@ -619,6 +679,15 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
               e.target.value = "";
               void addImages(files);
             }} />
+          {ai && canRecord() && (
+            <button type="button" className={`attach-btn dictate-btn${voice ? ` ${voice}` : ""}`} disabled={!ready || voice === "starting" || voice === "working"}
+              style={{ "--lvl": voice === "recording" ? voiceLevel.toFixed(2) : "0" } as React.CSSProperties}
+              aria-pressed={voice === "recording"}
+              title={voice === "recording" ? "Stop dictating" : voice === "working" ? "Writing out what you said…" : "Dictate (click again to stop)"}
+              aria-label={voice === "recording" ? "Stop dictating" : "Dictate"} onClick={() => void dictate()}>
+              <Icon name="mic" size={16} />
+            </button>
+          )}
           <button type="button" className="attach-btn" disabled={!ready || attachments.length >= MAX_IMAGES_PER_QUESTION}
             title="Add an image (or paste or drop one)" aria-label="Add image" onClick={() => fileInputRef.current?.click()}>
             <Icon name="image" size={16} />

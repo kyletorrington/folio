@@ -187,6 +187,11 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
   const dirtyRef = useRef(false);
   const exporting = useRef<PDFDocumentProxy | null>(null);
   const savingCopy = useRef(false);
+  /** The file on disk the open document came from, once the desktop shell has agreed Save may write to it. */
+  const linkedRef = useRef<{ ref: string; path: string } | null>(null);
+  const [linked, setLinked] = useState(false);
+  /** Where the document being opened was read from, if anywhere (set by the source, read when it opens). */
+  const sourcePath = useRef<string | undefined>(undefined);
 
   const [doc, setDoc] = useState<OpenDoc | null>(null);
   const [loading, setLoading] = useState(false);
@@ -512,6 +517,17 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
         };
 
         setDoc(next);
+        if (!previous) {
+          // A new document: forget the last one's file, then link this one's (a saved or edited version keeps it).
+          linkedRef.current = null;
+          setLinked(false);
+          const filePath = password ? undefined : sourcePath.current;
+          if (filePath && window.folioDesktop?.linkFile) void (async () => {
+            const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", data as Uint8Array<ArrayBuffer>))].map(b => b.toString(16).padStart(2, "0")).join("");
+            const ref = await window.folioDesktop!.linkFile(filePath, hash).catch(() => null);
+            if (ref && docRef.current === next) { linkedRef.current = { ref, path: filePath }; setLinked(true); }
+          })();
+        }
         if (!revision) { nextSelection.current = null; setContentEditing(false); }
         setEditorDirty(false);
         setImageDraft(null);
@@ -542,6 +558,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
             lastPage: pageRef.current,
             thumb,
             data: pdfBlob(data),
+            path: (previous ? linkedRef.current?.path : sourcePath.current) || undefined,
           });
         })().catch(() => {});
         return true;
@@ -585,7 +602,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
       if (window.folioDesktop && /\.docx?$/i.test(file.name)) return { kind: "word", name: file.name, file };
       if (file.type && file.type !== "application/pdf" && !/\.pdf$/i.test(file.name))
         return { kind: "error", name: file.name, message: `“${file.name}” isn't a PDF.` };
-      return { kind: "blob", name: file.name, blob: file };
+      return { kind: "blob", name: file.name, blob: file, path: window.folioDesktop?.pathForFile?.(file) || undefined };
     }));
   }, [tabs]);
 
@@ -1087,10 +1104,13 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
     }
   };
 
-  const download = async () => {
+  // Save writes back to the PDF the document was opened from; Save a copy downloads a new file, as before.
+  const saveToFile = () => download(true);
+  const download = async (toFile = false) => {
     if (contentRef.current && !(await contentRef.current.finish())) return;
     const doc = docRef.current;
-    if (!doc || savingCopy.current) return;
+    const file = toFile ? linkedRef.current : null;
+    if (!doc || savingCopy.current || (toFile && !file)) return;
     savingCopy.current = true;
     const revision = editRevision.current;
     try {
@@ -1098,9 +1118,20 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
       if (!copy || docRef.current !== doc) return;
       const withText = await copyWithText(ocr, copy.bytes, pageOrder);
       if (docRef.current !== doc) return;
-      const name = doc.sourceId ? copyName.replace(/\.pdf$/i, "") + " (edited).pdf" : copyName;
+      const name = file ? doc.name : doc.sourceId ? copyName.replace(/\.pdf$/i, "") + " (edited).pdf" : copyName;
       const blob = pdfBlob(withText.bytes);
-      saveBlob(blob, /\.pdf$/i.test(name) ? name : name + ".pdf");
+      if (file) {
+        let result = await window.folioDesktop!.saveFile(file.ref, withText.bytes);
+        if (result.conflict && window.confirm(result.conflict === "missing"
+          ? `“${name}” has been moved or deleted since you opened it. Save it again in its old place?`
+          : `“${name}” was changed by another program since you opened it. Replace it with your version?`)) {
+          result = await window.folioDesktop!.saveFile(file.ref, withText.bytes, true);
+        }
+        if (result.conflict) return;
+        if (!result.ok) { if (docRef.current === doc) setError(`Couldn't save “${name}”. ${result.error ?? ""}`.trim()); return; }
+      } else {
+        saveBlob(blob, /\.pdf$/i.test(name) ? name : name + ".pdf");
+      }
       if (editRevision.current === revision) setDirty(false);
       const changes = changesForCopy(doc, copy.annotated, pageOrder);
       let historyMessage = "";
@@ -1115,6 +1146,16 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
       }
       if (docRef.current !== doc) return;
       setError(null);
+      if (file) {
+        // The file's contents (and so Folio's id for it) have changed: show the saved file, carrying the document note
+        // and bookmarks over, with the highlights and comments now read from the PDF itself. Recent keeps just this version.
+        const page = pageOrder ? pageOrder.indexOf(pageRef.current) + 1 : pageRef.current;
+        if (await openBytes(name, withText.bytes, undefined, beginOpen(), page, undefined, doc, pageOrder) && docRef.current?.id !== doc.id) {
+          void removeRecent(doc.sourceId ?? doc.id).catch(() => {});
+        }
+        flash(withText.problem ? `Saved “${name}”. ${savedMessage({ markup: copy.annotated, ...withText })}` : `Saved “${name}”`, withText.problem ? 6000 : undefined);
+        return;
+      }
       if (doc.sourceId) {
         await openBytes(name, withText.bytes, undefined, beginOpen(), pageOrder ? pageOrder.indexOf(pageRef.current) + 1 : pageRef.current, undefined, doc, pageOrder);
       } else if (pageOrder) {
@@ -1182,6 +1223,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
 
   useEffect(() => {
     const open = async (source: OpenSource) => {
+      sourcePath.current = source.kind === "bytes" || source.kind === "blob" ? source.path : undefined;
       switch (source.kind) {
         case "bytes":
           await openBytes(source.name, new Uint8Array(source.data.buffer, source.data.byteOffset, source.data.byteLength), source.password);
@@ -1332,7 +1374,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
         requestAnimationFrame(() => document.getElementById("folio-search")?.focus());
       } else if (mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
-        download();
+        void download(linkedRef.current !== null && !e.shiftKey);
       } else if (mod && e.key.toLowerCase() === "p") {
         e.preventDefault();
         print();
@@ -1528,7 +1570,8 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
                   if (file) void insertImage(file);
                 }} />
               </>}
-              {(doc.sourceId || editorDirty) && <button aria-label="Save copy" title="Save edited copy" onClick={download}><Icon name="download" size={16} /><span>Save copy</span></button>}
+              {linked ? <button aria-label="Save" title={keys("Save to the PDF file (Ctrl+S)")} onClick={saveToFile}><Icon name="save" size={16} /><span>Save</span></button>
+                : (doc.sourceId || editorDirty) && <button aria-label="Save copy" title="Save edited copy" onClick={() => download()}><Icon name="download" size={16} /><span>Save copy</span></button>}
             </div>
           )}
         </div>
@@ -1550,7 +1593,8 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
                     { kind: "action", icon: "plus", label: "New tab", shortcut: keys("Ctrl T"), onSelect: () => tabs.library() },
                     { kind: "action", icon: "close", label: "Close document", shortcut: keys("Ctrl W"), onSelect: () => void tabs.close(tabKey) },
                     { kind: "divider" },
-                    { kind: "action", icon: "download", label: "Save a copy", shortcut: keys("Ctrl S"), onSelect: download },
+                    ...(linked ? [{ kind: "action", icon: "save", label: "Save", shortcut: keys("Ctrl S"), onSelect: saveToFile }] : []),
+                    { kind: "action", icon: "download", label: "Save a copy", shortcut: keys(linked ? "Ctrl Shift S" : "Ctrl S"), onSelect: () => download() },
                     { kind: "action", icon: "history", label: "Version history", onSelect: () => { setAiOpen(false); setHistoryOpen(true); } },
                     { kind: "action", icon: "print", label: "Print", shortcut: keys("Ctrl P"), onSelect: print },
                     { kind: "action", icon: "info", label: "Document info", onSelect: () => setDialog("info") },
@@ -1582,7 +1626,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
             onToggleBookmark={n => markupRef.current!.toggleBookmark(n)}
             order={pageDraft?.order ?? null}
             onOrder={order => setPageDraft(order ? { order } : null)}
-            onSaveOrder={download}
+            onSaveOrder={() => download()}
               onExportPages={exportPages}
             onOpenCopy={pageDraft?.copy ? () => {
               tabs.open([{ kind: "bytes", name: copyName, data: pageDraft.copy!, password: doc.password }]);
@@ -1820,7 +1864,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
         )}
       </div>
 
-      {!doc && <Welcome active={active} onPick={pickFile} onOpenUrl={() => openUrlDialog()} onOpenRecent={file => tabs.open([{ kind: "blob", name: file.name, blob: file.data, recentId: file.id }])}
+      {!doc && <Welcome active={active} onPick={pickFile} onOpenUrl={() => openUrlDialog()} onOpenRecent={file => tabs.open([{ kind: "blob", name: file.name, blob: file.data, recentId: file.id, path: file.path }])}
         onSample={() => tabs.open([{ kind: "sample", name: "Folio sample.pdf" }])} loading={loading} />}
 
       {loading && doc && <div className="loading-bar" />}

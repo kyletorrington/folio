@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld("folioDesktop", {
   printSheets: (job) => ipcRenderer.invoke("folio:print-sheets", job),
   /** Called with (name, data, note?) whenever a PDF is opened from Explorer, or a Word document has been converted. */
   onOpenFile(callback) {
-    const listener = (_e, file) => callback(file.name, new Uint8Array(file.data), file.note ?? undefined, file.token);
+    const listener = (_e, file) => callback(file.name, new Uint8Array(file.data), file.note ?? undefined, file.token, file.path ?? undefined);
     ipcRenderer.on("folio:open-file", listener);
     return () => ipcRenderer.removeListener("folio:open-file", listener);
   },
@@ -28,6 +28,12 @@ contextBridge.exposeInMainWorld("folioDesktop", {
   },
   /** Returns the converted PDF to the tab that opened the Word document. */
   openDocument: (file) => ipcRenderer.invoke("folio:open-document", webUtils.getPathForFile(file)),
+  /** Where a chosen or dropped file is on disk ("" when it has no path). */
+  pathForFile(file) { try { return webUtils.getPathForFile(file); } catch { return ""; } },
+  /** Links an open document to its file, given the SHA-256 (hex) of the bytes read from it; resolves to a ref or null. */
+  linkFile: (path, hash) => ipcRenderer.invoke("folio:link-file", path, hash),
+  /** Writes a PDF back to a linked file: { ok } | { conflict: "changed" | "missing" } | { error }. */
+  saveFile: (ref, bytes, force) => ipcRenderer.invoke("folio:save-file", ref, bytes, force),
   ready: () => ipcRenderer.invoke("folio:ready"),
   platform: process.platform,
   openDownload: () => ipcRenderer.invoke("folio:open-download"),
@@ -69,6 +75,9 @@ contextBridge.exposeInMainWorld("folioDesktop", {
     customEndpoint: (action, input) => ipcRenderer.invoke("folio:ai-custom-endpoint", action, input),
     customModels: () => ipcRenderer.invoke("folio:ai-custom-models"),
     ask: (request) => ipcRenderer.invoke("folio:ai-ask", request),
+    dictationKey: (action, key) => ipcRenderer.invoke("folio:ai-dictation-key", action, key),
+    /** Turns a recording into words: { ok, text } | { error, code? }. */
+    dictate: (bytes, mime, documentName) => ipcRenderer.invoke("folio:ai-dictate", bytes, mime, documentName),
     cancel: (id) => ipcRenderer.invoke("folio:ai-cancel", id),
     /** Called with { id, type: "delta" | "done" | "error", text?, message?, code?, link? } for every answer. */
     onEvent(callback) {

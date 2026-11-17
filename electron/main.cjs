@@ -14,6 +14,7 @@ const { csp } = require("./csp.cjs");
 const { WORD_FILE, openWord } = require("./convert.cjs");
 const { registerPrinting } = require("./printing.cjs");
 const { MAX_DOCUMENT_BYTES, checkDiskPath, readRegular } = require("./document-files.cjs");
+const { register: registerSaveFile } = require("./save-file.cjs");
 
 if (!app.isPackaged && process.env.FOLIO_TEST_USER_DATA) app.setPath("userData", process.env.FOLIO_TEST_USER_DATA);
 // Automated tests drive a window that never appears, so a local run doesn't take over the screen or focus.
@@ -96,7 +97,7 @@ async function sendFile(file) {
   try {
     checkDiskPath(file);
     const data = await readRegular(await fs.promises.realpath(file));
-    if (!target.isDestroyed()) target.webContents.send("folio:open-file", { name: path.basename(file), data });
+    if (!target.isDestroyed()) target.webContents.send("folio:open-file", { name: path.basename(file), data, path: file });
   } catch (err) {
     dialog.showErrorBox("Couldn't open file", `${file}\n\n${err.userMessage ?? err.message}`);
   }
@@ -294,10 +295,16 @@ function createWindow() {
   // Folio's own page may write (never read) the clipboard, for its Copy buttons.
   const clipboardWrite = (contents, permission, url) =>
     contents === cameraOwner && permission === "clipboard-sanitized-write" && isAppUrl(url ?? "");
+  // The microphone, for voice typing in Ask AI: only Folio's own page (its document tabs included), and only sound.
+  // Pressing the microphone button is the request; Windows and macOS show their own indicator while it records.
+  const microphone = (contents, details) => contents === cameraOwner && isAppUrl(details.requestingUrl ?? "")
+    && details.mediaTypes?.length > 0 && details.mediaTypes.every(type => type === "audio");
   cameraOwner.session.setPermissionCheckHandler((contents, permission, origin, details) =>
-    contents === cameraOwner && permission === "media" && trustedCameraOrigin(details.requestingUrl || origin) && details.mediaType === "video");
+    contents === cameraOwner && permission === "media" && trustedCameraOrigin(details.requestingUrl || origin)
+      && (details.mediaType === "video" || details.mediaType === "audio"));
   cameraOwner.session.setPermissionRequestHandler((contents, permission, callback, details) => {
     if (clipboardWrite(contents, permission, details.requestingUrl)) return callback(true);
+    if (permission === "media" && microphone(contents, details)) return callback(true);
     if (contents !== cameraOwner || permission !== "media" || !details.isMainFrame
       || !trustedCameraOrigin(details.requestingUrl) || !details.mediaTypes?.length
       || details.mediaTypes.some(type => type !== "video")) return callback(false);
@@ -568,6 +575,7 @@ if (!app.requestSingleInstanceLock()) {
 
     ai.register(handle, (channel, payload) => win?.webContents.send(channel, payload), { confirmLocal: (url, addresses) => confirmLocalAddress(url, addresses) });
     registerPrinting(handle, () => win);
+    registerSaveFile(handle);
 
     handle("folio:ready", () => {
       rendererReady = true;
