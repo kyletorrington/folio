@@ -313,6 +313,7 @@ export interface StoredAiMessage {
   role: "user" | "assistant";
   content: string;
   context?: { text: string; page: number };
+  images?: { mediaType: "image/png" | "image/jpeg"; data: string; name?: string }[];
 }
 
 export async function getAiHistory(id: string) {

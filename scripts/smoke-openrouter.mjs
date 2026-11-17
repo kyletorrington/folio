@@ -63,10 +63,39 @@ export async function checkOpenRouter(app, page) {
     const request = await app.evaluate(() => globalThis.routerTest.request);
     assert.equal(request.model, "sample/reader");
     assert.match(JSON.parse(request.messages[1].content).document.text, /\[Page 2\]/);
+    // Images: chosen from a file, pasted, and dropped on the panel (not opened as a document), then sent as image parts.
+    const png = await panel.getByRole("textbox").evaluate(() => {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 8;
+      canvas.getContext("2d").fillRect(0, 0, 4, 4);
+      return canvas.toDataURL("image/png").split(",")[1];
+    });
+    await panel.locator('input[type="file"]').setInputFiles({ name: "chosen.png", mimeType: "image/png", buffer: Buffer.from(png, "base64") });
+    const attached = panel.getByRole("list", { name: "Attached images" });
+    await attached.getByRole("img", { name: "chosen.png" }).waitFor();
+    await panel.getByRole("textbox").evaluate((textarea, png) => {
+      const bytes = Uint8Array.from(atob(png), c => c.charCodeAt(0));
+      const transfer = name => { const data = new DataTransfer(); data.items.add(new File([bytes], name, { type: "image/png" })); return data; };
+      textarea.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer("pasted.png"), bubbles: true, cancelable: true }));
+      const dropped = transfer("dropped.png");
+      for (const type of ["dragenter", "dragover", "drop"]) textarea.dispatchEvent(new DragEvent(type, { dataTransfer: dropped, bubbles: true, cancelable: true }));
+    }, png);
+    await attached.getByRole("img", { name: "dropped.png" }).waitFor();
+    assert.equal(await attached.getByRole("img").count(), 3);
+    assert.ok((await page.window.title()).startsWith("Field notes.pdf"));
+    await panel.getByRole("button", { name: "Remove pasted.png" }).click();
+    await panel.getByRole("textbox").fill("What does this chart show?");
+    await panel.getByRole("button", { name: "Send", exact: true }).click();
+    await panel.locator(".msg.user .msg-images img").nth(1).waitFor();
+    assert.equal(await attached.count(), 0);
+    const withImages = (await app.evaluate(() => globalThis.routerTest.request)).messages.at(-1);
+    assert.deepEqual(withImages.content.map(part => part.type), ["text", "image_url", "image_url"]);
+    assert.equal(withImages.content[1].image_url.url, `data:image/png;base64,${png}`);
+    await panel.getByRole("button", { name: "(p. 2)" }).nth(1).waitFor();
     await app.evaluate(() => { globalThis.routerTest.hold = true; });
     await panel.getByRole("textbox").fill("Continue");
     await panel.getByRole("button", { name: "Send", exact: true }).click();
-    for (let i = 0; i < 100 && !(await app.evaluate(() => globalThis.routerTest.calls.filter(c => c.endsWith("completions")).length === 2)); i++) await page.waitForTimeout(50);
+    for (let i = 0; i < 100 && !(await app.evaluate(() => globalThis.routerTest.calls.filter(c => c.endsWith("completions")).length === 3)); i++) await page.waitForTimeout(50);
     await panel.getByRole("button", { name: "Stop" }).click();
     await panel.getByRole("button", { name: "Send", exact: true }).waitFor();
     assert.ok(await app.evaluate(() => globalThis.routerTest.cancelled));
@@ -83,6 +112,6 @@ export async function checkOpenRouter(app, page) {
     await settings.getByLabel("Ask AI provider").selectOption("chatgpt");
     await settings.getByRole("button", { name: "Close" }).click();
     await page.getByRole("tablist", { name: "Open documents" }).getByRole("button", { name: "Close Field notes.pdf" }).click();
-    console.log("ok  OpenRouter setup, models, streaming, citations, Stop, provider switching and key removal");
+    console.log("ok  OpenRouter setup, models, streaming, citations, images, Stop, provider switching and key removal");
   } finally { await app.evaluate(() => { globalThis.routerTest.restore(); delete globalThis.routerTest; }); }
 }

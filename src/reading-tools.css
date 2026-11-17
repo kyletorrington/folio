@@ -285,6 +285,88 @@
   border-left: 1px solid var(--line);
   animation: slide-in 0.22s var(--ease);
 }
+.ai-panel.dropping {
+  position: relative;
+}
+.ai-panel.dropping::after {
+  content: "Drop image to add it to your question";
+  position: absolute;
+  inset: 8px;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--accent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent-soft) 85%, var(--bg));
+  color: var(--accent-text);
+  font-size: 13px;
+  font-weight: 500;
+  pointer-events: none;
+}
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.msg-images img {
+  max-width: 100%;
+  max-height: 180px;
+  border-radius: 8px;
+  object-fit: contain;
+  background: var(--surface);
+}
+.ai-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ai-attachments li {
+  position: relative;
+}
+.ai-attachments img {
+  display: block;
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  object-fit: cover;
+}
+.ai-attachments button {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--text);
+  color: var(--bg);
+}
+.ai-attach-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.attach-btn {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--text-2);
+}
+.attach-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+.attach-btn:disabled {
+  opacity: 0.35;
+}
 @keyframes slide-in {
   from {
     opacity: 0;

@@ -71,7 +71,7 @@ function createOpenRouter({ net, safeStorage, file, writeAtomic }) {
       const passage = messages.at(-1)?.context;
       if (document.truncated && !passage) throw new Error("This document exceeds Folio’s whole-document limit. Select a passage and ask again.");
       const { instructions, input } = chatRequest(model, passage
-        ? { ...document, text: `[Page ${passage.page}]\n${passage.text}`, truncated: true } : document, messages);
+        ? { ...document, text: `[Page ${passage.page}]\n${passage.text}`, truncated: true } : document, messages, "chat");
       // Small-context endpoints can otherwise silently drop the middle of the document.
       const body = JSON.stringify({ model, messages: [{ role: "system", content: instructions }, ...input], stream: true,
         plugins: [{ id: "context-compression", enabled: false }] });

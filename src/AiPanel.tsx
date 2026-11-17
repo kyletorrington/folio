@@ -9,6 +9,7 @@ import { CLAUDE_CODE_URL, PROVIDERS, savedProvider, saveAiPreference, signInChat
 import { Modal } from "./Dialogs";
 import { readSetting } from "./preferences";
 import { splitComments, type AiComment, type PlacedComment } from "./aiComments";
+import { imageUrl, isChatImageType, limitImages, MAX_IMAGES_PER_QUESTION, prepareImage, validChatImage, type ChatImage } from "./chatImages";
 
 const AiMarkdown = lazy(() => import("./AiMarkdown").then((module) => ({ default: module.AiMarkdown })));
 
@@ -101,7 +102,12 @@ function CopyResponse({ text }: { text: string }) {
 
 // Failed and empty answers aren't kept.
 const storedMessages = (messages: Message[]) =>
-  messages.filter((m) => !m.error && m.content).map(({ role, content, context }) => ({ role, content, ...(context ? { context } : {}) }));
+  messages.filter((m) => !m.error && (m.content || m.images?.length)).map(({ role, content, context, images }) =>
+    ({ role, content, ...(context ? { context } : {}), ...(images?.length ? { images } : {}) }));
+
+/** Dragged items are files Ask AI can attach (other files, such as PDFs, still open as documents). */
+const draggingImages = (data: DataTransfer | null) =>
+  !!data && data.types.includes("Files") && [...data.items].some((item) => item.kind === "file" && isChatImageType(item.type));
 
 function NewConversationDialog({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }) {
   return <div onMouseDownCapture={event => {
@@ -198,6 +204,11 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
   const [signingIn, setSigningIn] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
   const [confirmNew, setConfirmNew] = useState(false);
+  const [attachments, setAttachments] = useState<ChatImage[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [dropping, setDropping] = useState(false);
+  const dropDepth = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const busyRef = useRef<string | null>(null);
   const preparing = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -326,16 +337,33 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
     setMessages(list => list.slice(0, -1));
   };
 
+  const addImages = useCallback(async (files: File[]) => {
+    setAttachError(null);
+    const images = files.filter((file) => isChatImageType(file.type));
+    if (images.length < files.length) setAttachError("Only PNG and JPEG images can be added.");
+    if (!images.length) return;
+    const room = MAX_IMAGES_PER_QUESTION - attachments.length;
+    if (images.length > room) setAttachError(`You can add up to ${MAX_IMAGES_PER_QUESTION} images to a question.`);
+    const prepared = await Promise.all(images.slice(0, Math.max(0, room)).map((file) => prepareImage(file).catch(() => null)));
+    if (prepared.some((image) => !image)) setAttachError("Folio couldn't read that image.");
+    const added = prepared.filter((image): image is ChatImage => !!image);
+    setAttachments((list) => [...list, ...added].slice(0, MAX_IMAGES_PER_QUESTION));
+    inputRef.current?.focus();
+  }, [attachments.length]);
+
   const send = useCallback(async (question: string) => {
-    if (!ai || !question.trim() || busyRef.current || !ready) return;
-    const turn: Message = { role: "user", content: question.trim(), ...(context ? { context } : {}) };
-    const history = [...messages.filter((m) => !m.error && m.content), turn];
+    if (!ai || (!question.trim() && !attachments.length) || busyRef.current || !ready) return;
+    const turn: Message = { role: "user", content: question.trim(), ...(context ? { context } : {}),
+      ...(attachments.length ? { images: attachments } : {}) };
+    const history = limitImages([...messages.filter((m) => !m.error && (m.content || m.images?.length)), turn]);
     const id = crypto.randomUUID();
     preparing.current = id;
     busyRef.current = id;
     setBusy(id);
     setMessages([...messages, turn, { role: "assistant", content: "", answerId: id }]);
     setInput("");
+    setAttachments([]);
+    setAttachError(null);
     onClearContext();
     try {
       const session = ocrSession(pdf);
@@ -345,7 +373,8 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
       if (preparing.current !== id) return;
       preparing.current = null;
       await ai.ask({ id, provider, model, document: { name: docName, ...doc },
-        messages: history.map(({ role, content, context }) => ({ role, content, ...(context ? { context } : {}) })) });
+        messages: history.map(({ role, content, context, images }) => ({ role, content, ...(context ? { context } : {}),
+          ...(role === "user" && images?.length ? { images: images.map(({ mediaType, data }) => ({ mediaType, data })) } : {}) })) });
     } catch {
       if (busyRef.current !== id) return;
       preparing.current = null;
@@ -357,7 +386,7 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
         return next;
       });
     }
-  }, [ai, pdf, context, messages, provider, model, docName, onClearContext, ready]);
+  }, [ai, pdf, context, messages, attachments, provider, model, docName, onClearContext, ready]);
 
   const signIn = async () => {
     if (!ai) return;
@@ -373,7 +402,34 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
     : context ? "Ask about the selected passage…" : "Ask about this document…";
 
   return (
-    <aside className="ai-panel" aria-label="Ask AI">
+    // Images dropped here are attached to the question; the window's own handler (which opens dropped PDFs) never sees them.
+    <aside className={`ai-panel${dropping ? " dropping" : ""}`} aria-label="Ask AI"
+      onDragEnter={(e) => {
+        if (!ready || !draggingImages(e.dataTransfer)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        dropDepth.current++;
+        setDropping(true);
+      }}
+      onDragOver={(e) => {
+        if (!ready || !draggingImages(e.dataTransfer)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "copy";
+      }}
+      onDragLeave={(e) => {
+        if (!ready || !draggingImages(e.dataTransfer)) return;
+        e.stopPropagation();
+        if (--dropDepth.current <= 0) { dropDepth.current = 0; setDropping(false); }
+      }}
+      onDrop={(e) => {
+        if (!ready || !draggingImages(e.dataTransfer)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        dropDepth.current = 0;
+        setDropping(false);
+        void addImages([...e.dataTransfer.files]);
+      }}>
       <header className="ai-head">
         <div className="ai-title"><Icon name="sparkle" size={16} /> Ask AI</div>
         {ai && <select className="ai-provider" aria-label="AI provider" value={provider} disabled={!!busy}
@@ -459,7 +515,14 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
                 {m.role === "user" ? (
                   <>
                     {m.context && <blockquote>p. {m.context.page}: {m.context.text.length > 220 ? m.context.text.slice(0, 220) + "…" : m.context.text}</blockquote>}
-                    <p>{m.content}</p>
+                    {Array.isArray(m.images) && m.images.some(validChatImage) && (
+                      <div className="msg-images">
+                        {m.images.filter(validChatImage).map((image, k) => (
+                          <img key={k} src={imageUrl(image)} alt={image.name ?? `Image ${k + 1}`} title={image.name} />
+                        ))}
+                      </div>
+                    )}
+                    {m.content && <p>{m.content}</p>}
                   </>
                 ) : m.error ? (
                   <div className="msg-error">
@@ -508,6 +571,20 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
             </button>
           </div>
         )}
+        {attachments.length > 0 && (
+          <ul className="ai-attachments" aria-label="Attached images">
+            {attachments.map((image, i) => (
+              <li key={i}>
+                <img src={imageUrl(image)} alt={image.name ?? `Image ${i + 1}`} title={image.name} />
+                <button type="button" aria-label={`Remove ${image.name ?? `image ${i + 1}`}`} title="Remove"
+                  onClick={() => { setAttachments((list) => list.filter((_, k) => k !== i)); setAttachError(null); }}>
+                  <Icon name="close" size={11} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {attachError && <p className="ai-attach-error" role="status">{attachError}</p>}
         <form
           className="composer"
           onSubmit={(e) => {
@@ -522,6 +599,13 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
             disabled={!ready}
             placeholder={placeholder}
             onChange={(e) => setInput(e.target.value)}
+            onPaste={(e) => {
+              // Copied text wins over the picture some apps put on the clipboard with it (Excel cells, Word paragraphs).
+              const files = [...e.clipboardData.files].filter((file) => isChatImageType(file.type));
+              if (!files.length || e.clipboardData.getData("text/plain").trim()) return;
+              e.preventDefault();
+              void addImages(files);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
@@ -529,12 +613,22 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
               }
             }}
           />
+          <input ref={fileInputRef} type="file" accept="image/png,image/jpeg" multiple hidden aria-label="Choose images"
+            onChange={(e) => {
+              const files = [...(e.target.files ?? [])];
+              e.target.value = "";
+              void addImages(files);
+            }} />
+          <button type="button" className="attach-btn" disabled={!ready || attachments.length >= MAX_IMAGES_PER_QUESTION}
+            title="Add an image (or paste or drop one)" aria-label="Add image" onClick={() => fileInputRef.current?.click()}>
+            <Icon name="image" size={16} />
+          </button>
           {busy ? (
             <button type="button" className="send-btn" onClick={stop} title="Stop" aria-label="Stop">
               <Icon name="stop" size={15} />
             </button>
           ) : (
-            <button type="submit" className="send-btn" disabled={!ready || !input.trim()} title="Send (Enter)" aria-label="Send">
+            <button type="submit" className="send-btn" disabled={!ready || (!input.trim() && !attachments.length)} title="Send (Enter)" aria-label="Send">
               <Icon name="send" size={16} />
             </button>
           )}

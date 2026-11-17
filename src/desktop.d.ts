@@ -51,6 +51,8 @@ interface AiMessage {
   role: "user" | "assistant";
   content: string;
   context?: { text: string; page: number };
+  /** Pictures attached to a question, as base64 (user messages only). */
+  images?: { mediaType: "image/png" | "image/jpeg"; data: string; name?: string }[];
 }
 
 interface AiEvent {

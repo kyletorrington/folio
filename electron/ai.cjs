@@ -484,6 +484,11 @@ async function askClaude({ model, document, messages }, emit, signal) {
   const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--tools", "",
     "--system-prompt-file", promptFile, "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands", "--no-session-persistence"];
   if (model && CLAUDE_MODELS.has(model)) args.push("--model", model);
+  // A plain prompt can't carry images; a stream-json user message carries the same text followed by the image blocks.
+  const stdin = prompt.images
+    ? (args.push("--input-format", "stream-json"), JSON.stringify({ type: "user", message: { role: "user",
+      content: [{ type: "text", text: prompt.input }, ...prompt.images] } }) + "\n")
+    : prompt.input;
   return new Promise((resolve, reject) => {
     let child;
     try {
@@ -536,7 +541,7 @@ async function askClaude({ model, document, messages }, emit, signal) {
       if (/limit|usage/i.test(message)) return reject(Object.assign(new Error("You've reached your Claude usage limit. " + message.split("\n")[0]), { code: "usage_limit" }));
       reject(new Error(message.split("\n")[0] || "Claude Code couldn't answer."));
     });
-    child.stdin.end(prompt.input);
+    child.stdin.end(stdin);
   });
 }
 
@@ -551,8 +556,17 @@ function validRequest(req) {
     && Array.isArray(req.messages) && req.messages.length > 0 && req.messages.length < 200
     && req.messages.every((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string"
       && (m.context === undefined || (m.role === "user" && typeof m.context?.text === "string" && Number.isSafeInteger(m.context.page) && m.context.page >= 1)))
+    && req.messages.every((m) => m.images === undefined || (m.role === "user" && validImages(m.images)))
+    && req.messages.reduce((n, m) => n + (m.images?.length ?? 0), 0) <= MAX_IMAGES
     && req.document.name.length + req.document.text.length + req.messages.reduce((n, m) => n + m.content.length + (m.context?.text.length ?? 0), 0) < MAX_CHARS;
 }
+
+// Images arrive scaled to at most 3.5 MB (src/chatImages.ts), which is under every provider's per-image limit.
+const MAX_IMAGES = 20;
+const MAX_IMAGE_CHARS = 4_800_000;
+const validImages = (images) => Array.isArray(images) && images.length > 0 && images.every((image) => image
+  && (image.mediaType === "image/png" || image.mediaType === "image/jpeg")
+  && typeof image.data === "string" && image.data.length > 0 && image.data.length <= MAX_IMAGE_CHARS && /^[A-Za-z0-9+/]+={0,2}$/.test(image.data));
 
 const MAX_ACTIVE = 2;
 
@@ -610,8 +624,9 @@ function register(handle, send, { confirmLocal } = {}) {
     const emit = (text) => send("folio:ai-event", { id: req.id, type: "delta", text });
     const ask = { chatgpt: askChatGPT, claude: askClaude, openrouter: openRouter.ask, custom: customEndpoint.ask }[req.provider];
     const { name, text, truncated, recognized } = req.document;
-    const messages = req.messages.map(({ role, content, context }) => context
-      ? { role, content, context: { text: context.text, page: context.page } } : { role, content });
+    const messages = req.messages.map(({ role, content, context, images }) => ({ role, content,
+      ...(context ? { context: { text: context.text, page: context.page } } : {}),
+      ...(images ? { images: images.map(({ mediaType, data }) => ({ mediaType, data })) } : {}) }));
     Promise.resolve(ask({ model: req.model, document: { name, text, truncated, recognized }, messages }, emit, controller.signal))
       .then(() => send("folio:ai-event", { id: req.id, type: "done" }))
       .catch((e) => send("folio:ai-event", controller.signal.aborted ? { id: req.id, type: "done" }
