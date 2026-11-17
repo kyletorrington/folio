@@ -456,6 +456,11 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
     setStatus(result.status);
   };
 
+  // Shown on hover over the model: the row below the box now holds the microphone and image buttons.
+  const usedVia = provider === "chatgpt" ? "Uses your ChatGPT plan" : provider === "openrouter" ? "Billed by OpenRouter"
+    : provider === "custom" ? `Sent to ${status?.custom.configured ? new URL(status.custom.baseUrl).host : "your endpoint"}`
+    : status?.claude.subscription ? "Uses your Claude subscription via Claude Code" : "Uses Claude Code";
+
   const placeholder = !ready ? "Connect an AI provider to ask questions"
     : context ? "Ask about the selected passage…" : "Ask about this document…";
 
@@ -673,6 +678,24 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
               }
             }}
           />
+          {busy ? (
+            <button type="button" className="send-btn" onClick={stop} title="Stop" aria-label="Stop">
+              <Icon name="stop" size={15} />
+            </button>
+          ) : (
+            <button type="submit" className="send-btn" disabled={!ready || (!input.trim() && !attachments.length)} title="Send (Enter)" aria-label="Send">
+              <Icon name="send" size={16} />
+            </button>
+          )}
+        </form>
+        {ready && (
+          <div className="ai-meta">
+            {provider === "openrouter" || provider === "custom" ? <button className="link small router-model-link" title={`${model} · ${usedVia}`} onClick={onSettings}>{model}</button> :
+            <select value={model} onChange={(e) => saveAiPreference(modelKey, e.target.value)} aria-label="Model" title={usedVia}>
+              {(provider === "chatgpt" ? models : CLAUDE_MODELS).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>}
+            {/* Below the box rather than inside it, so the box keeps its width for typing. */}
+            <div className="ai-tools">
           <input ref={fileInputRef} type="file" accept="image/png,image/jpeg" multiple hidden aria-label="Choose images"
             onChange={(e) => {
               const files = [...(e.target.files ?? [])];
@@ -692,29 +715,7 @@ export function AiPanel({ pdf, docId, persist, docName, context, onClearContext,
             title="Add an image (or paste or drop one)" aria-label="Add image" onClick={() => fileInputRef.current?.click()}>
             <Icon name="image" size={16} />
           </button>
-          {busy ? (
-            <button type="button" className="send-btn" onClick={stop} title="Stop" aria-label="Stop">
-              <Icon name="stop" size={15} />
-            </button>
-          ) : (
-            <button type="submit" className="send-btn" disabled={!ready || (!input.trim() && !attachments.length)} title="Send (Enter)" aria-label="Send">
-              <Icon name="send" size={16} />
-            </button>
-          )}
-        </form>
-        {ready && (
-          <div className="ai-meta">
-            {provider === "openrouter" || provider === "custom" ? <button className="link small router-model-link" title={model} onClick={onSettings}>{model}</button> :
-            <select value={model} onChange={(e) => saveAiPreference(modelKey, e.target.value)} aria-label="Model">
-              {(provider === "chatgpt" ? models : CLAUDE_MODELS).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
-            </select>}
-            {provider === "chatgpt" ? (
-              <span>Using ChatGPT plan · <a href={USAGE_URL} target="_blank" rel="noreferrer">Manage usage</a></span>
-            ) : provider === "openrouter" ? <span>Billed by OpenRouter</span> : provider === "custom" ? (
-              <span title={status?.custom.baseUrl}>Sent to {status?.custom.configured ? new URL(status.custom.baseUrl).host : "your endpoint"}</span>
-            ) : (
-              <span>{status?.claude.subscription ? "Using your Claude subscription via Claude Code" : "Using Claude Code"}</span>
-            )}
+            </div>
           </div>
         )}
       </footer>

@@ -74,7 +74,7 @@ export async function checkCustomEndpoint(app, page) {
     await settings.getByRole("button", { name: /harbor-large/ }).click();
     assert.deepEqual(served.map(s => s.path), ["/v1/models", "/v1/models"]);
     await settings.getByRole("button", { name: "Close" }).click();
-    await panel.getByText(`Sent to ${host}`).waitFor();
+    await panel.locator(`.router-model-link[title$="Sent to ${host}"]`).waitFor();
     await panel.getByRole("textbox").fill("When does the ferry leave?");
     await panel.getByRole("button", { name: "Send", exact: true }).click();
     await panel.getByRole("button", { name: "(p. 2)" }).click();

@@ -367,6 +367,15 @@
 .attach-btn:disabled {
   opacity: 0.35;
 }
+.ai-tools {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+.ai-tools .attach-btn {
+  width: 30px;
+  height: 30px;
+}
 /* As in the devbox console: red while recording, with a glow that grows with the voice; a slow pulse while written out. */
 .dictate-btn {
   transition: box-shadow 0.12s;
